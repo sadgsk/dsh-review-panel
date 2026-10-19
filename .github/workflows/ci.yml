@@ -1,0 +1,31 @@
+name: Test
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: Node 24 / ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, macos-latest, ubuntu-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - name: Build and regression tests
+        run: npm test
+      - name: Install the tested TypeScript language server
+        run: npm install --global typescript@5 typescript-language-server@6.0.2
+      - name: Real TypeScript integration
+        run: npm run test:lsp:real
+      - name: Verify release file list
+        run: npm pack --dry-run

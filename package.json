@@ -1,0 +1,50 @@
+{
+  "name": "dsh-review-panel",
+  "version": "0.2.0",
+  "private": true,
+  "type": "module",
+  "license": "MIT",
+  "description": "Cursor-style read-only code review panel for the DSH right sidebar: full-source inline diffs, workspace tree, editor tabs and VS Code-style navigation",
+  "keywords": ["dsh", "dsh-plugin", "deepseek-harness", "code-review", "inline-diff", "monaco", "diff"],
+  "main": "./lib/index.js",
+  "scripts": {
+    "build": "node scripts/build-client.mjs",
+    "test": "node scripts/build-client.mjs && node --check lib/client.js && node scripts/smoke-client.mjs && node scripts/smoke-host.mjs && node scripts/test-client-state.mjs && node scripts/test-shortcuts.mjs && node scripts/test-git.mjs && node scripts/test-lsp.mjs",
+    "test:client": "node scripts/test-client-state.mjs",
+    "test:git": "node scripts/test-git.mjs",
+    "test:shortcuts": "node scripts/test-shortcuts.mjs",
+    "prepack": "node scripts/build-client.mjs",
+    "test:lsp:real": "node scripts/test-lsp.mjs --real"
+  },
+  "exports": {
+    ".": "./lib/index.js",
+    "./client": "./lib/client.js",
+    "./locale/*.json": "./locale/*.json",
+    "./icon": "./icon.svg",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "lib",
+    "assets",
+    "cordis.patch.yml",
+    "locale/*.json",
+    "icon.svg",
+    "README.md",
+    "LICENSE",
+    "THIRD_PARTY_NOTICES.md",
+    "licenses"
+  ],
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web",
+      "immediately": true,
+      "inject": [
+        "@deepseek-ai/dsh-client-ui-conversation",
+        "@deepseek-ai/dsh-client-ui-sidebar-right"
+      ]
+    }
+  }
+}

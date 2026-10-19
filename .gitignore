@@ -1,0 +1,27 @@
+# The repository root IS the installable plugin package (package.json +
+# cordis.patch.yml). Only local development material is excluded here.
+
+# Local development references, application profiles, research captures and fixtures.
+/backups/
+/reference/
+/research/
+/bugs/
+/demo/
+
+# Local handoff and acceptance records contain machine-specific paths.
+/ACCEPTANCE-*.md
+/HANDOFF-*.md
+/NOTES*.md
+/REVIEW-*.md
+/START-HERE.md
+/SPEC.md
+
+# Dependencies, generated archives, logs and local credentials.
+node_modules/
+*.tgz
+*.log
+.env
+.env.*
+!.env.example
+.DS_Store
+Thumbs.db

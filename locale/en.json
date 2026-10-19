@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "Code Review Panel",
+    "description": "Cursor-style read-only code review: full source files with inline line-level diffs in a right-sidebar tab, plus a workspace file tree, editor tabs, quick open and VS Code-style navigation; opens from the composer pill above the chat input."
+  }
+}

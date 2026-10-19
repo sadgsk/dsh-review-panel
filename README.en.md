@@ -1,0 +1,76 @@
+# dsh-review-panel
+
+[![License](https://img.shields.io/badge/license-MIT-blue)](LICENSE) [![DeepSeek Harness](https://img.shields.io/badge/DeepSeek%20Harness-0.2.1%2B-4B6BFB)](https://www.deepseek.com/download/) <br>
+[中文](README.md) · [Issues](https://github.com/sadgsk/dsh-review-panel/issues)
+
+![Code review: full source with line-level inline diffs](docs/images/review-panel.png)
+
+## What is this
+
+`dsh-review-panel` brings a **Cursor-style code review experience** to DeepSeek Harness. It adds a read-only **Code Review** tab to the official right sidebar, showing what the agent changed in this turn as full source files with line-level inline diffs — and it brings the **VS Code shortcuts** you already know.
+
+DSH's builtin review shows one hunk at a time; this panel gives you the **whole file** — added lines tinted across the full row, deleted lines kept inline with their original line numbers — plus a file tree, editor tabs and keyboard-driven navigation, so reviewing feels like working in an editor.
+
+- **Full source + inline line-level diffs** — added lines tinted, deleted lines inline with original line numbers
+- **Three diff baselines** — `Agent turn` / `Git uncommitted` / `Code only`, switchable in one click
+- **VS Code-style workspace** — file tree, editor tabs, Quick Open (`Ctrl+P`), command palette, workspace search
+- **Language-server navigation** — `F12` definition, `Shift+F12` references, hover, document outline, read-only diagnostics
+- **Read-only by design** — never writes files, never runs git mutations, never installs anything silently
+- **Follows the DSH light/dark theme automatically**
+
+## Install
+
+Requires **DSH 0.2.1-rc.2** or newer (Desktop and Web both work). Git and language servers are optional; the panel degrades gracefully without them.
+
+### 1. Open the Plugins page
+
+Open **Plugins** in DSH's left sidebar and click **Add plugin** at the top right:
+
+![Click Add plugin on the Plugins page](docs/images/install-plugins-page.png)
+
+### 2. Paste the repository URL and install
+
+Paste this repository's URL (`https://github.com/sadgsk/dsh-review-panel`) into the input and click **Install**:
+
+![Add plugin dialog](docs/images/install-dialog.png)
+
+### 3. Open Code Review
+
+Restart DSH when prompted. Then click **+** in the right sidebar and choose **Code Review / 代码审查**:
+
+![Open Code Review from the right-sidebar + menu](docs/images/entry-plus-menu.png)
+
+You can also open it from the "本轮修改" pill above the chat input.
+
+## Shortcuts
+
+Every command is registered through DSH's official shortcuts service, so all of them can be rebound in **Settings → General → Keyboard shortcuts**. On macOS, use `Cmd` instead of `Ctrl`; a chord the OS already owns may show as unbound, in which case rebind it in Settings.
+
+| Action | Windows / Linux | macOS |
+| --- | --- | --- |
+| Open Code Review | `Ctrl+Alt+D` | `Cmd+Option+D` |
+| Previous / next change | `Shift+F7` / `F7` | `Shift+F7` / `F7` |
+| Quick Open | `Ctrl+P` (fallback `Ctrl+Alt+P`) | `Cmd+P` (fallback `Cmd+Option+P`) |
+| Command palette | `Ctrl+Shift+P` | `Cmd+Shift+P` |
+| Workspace search | `Ctrl+Shift+F` | `Cmd+Shift+F` |
+| Go to line | `Ctrl+G` | `Cmd+G` |
+| Next / previous tab | `Ctrl+Tab` / `Ctrl+Shift+Tab` | `Cmd+Tab` / `Cmd+Shift+Tab` |
+| Close tab | `Ctrl+F4` | `Cmd+F4` |
+| Show / hide file tree | `Ctrl+Shift+E` | `Cmd+Shift+E` |
+| Document outline | `Ctrl+Shift+O` | `Cmd+Shift+O` |
+| Find in editor | `Ctrl+F` | `Cmd+F` |
+| Go to definition | `F12` / `Ctrl+click` | `F12` / `Cmd+click` |
+| Find references | `Shift+F12` | `Shift+F12` |
+| Fold / unfold block | `Ctrl+Shift+[` / `Ctrl+Shift+]` | `Cmd+Option+[` / `Cmd+Option+]` |
+| Fold / unfold all | `Ctrl+K Ctrl+0` / `Ctrl+K Ctrl+J` | `Cmd+K Cmd+0` / `Cmd+K Cmd+J` |
+| Font zoom | `Ctrl+wheel` / `Ctrl+=` / `Ctrl+-` / `Ctrl+0` | `Cmd+wheel` / `Cmd+=` / `Cmd+-` / `Cmd+0` |
+
+Navigate back / forward has no default chord; bind it in Settings if you want it.
+
+## Feedback
+
+Found a bug, have an idea, or just want to share how you use it? Please open an [Issue](https://github.com/sadgsk/dsh-review-panel/issues).
+
+## License
+
+[MIT](LICENSE). See [THIRD_PARTY_NOTICES](THIRD_PARTY_NOTICES.md) for third-party components and their licenses.
