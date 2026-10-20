@@ -2,7 +2,7 @@
 /** Real-Git regressions for workspace paths, literal file names and empty/deleted sides. */
 import assert from 'node:assert/strict'
 import { spawn, execFileSync } from 'node:child_process'
-import { mkdir, mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises'
+import { mkdir, mkdtemp, readFile, realpath, rm, stat, symlink, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { basename, dirname, join, resolve } from 'node:path'
 import { GitRunner, parseUnifiedDiff, readGitFile, readGitStatus } from '../lib/host/git.js'
@@ -106,9 +106,9 @@ try {
   await rm(join(sub, 'binary.txt'))
 
   const status = await readGitStatus(ctx, provider, sub, signal)
-  assert.equal(status.available, true)
+  assert.equal(status.available, true, JSON.stringify(status))
   const changes = new Map(status.files.map((entry) => [entry.path, entry]))
-  assert.equal(changes.get('a.ts').code, 'M')
+  assert.equal(changes.get('a.ts')?.code, 'M', JSON.stringify({ cwd: sub, status }))
   assert.equal(changes.has('root.ts'), false)
   assert.equal(status.files.some((entry) => entry.path.startsWith('sub/') || entry.path.startsWith('../')), false)
   assert.equal(changes.get('new.ts').renamedFrom, 'old.ts')
@@ -123,6 +123,27 @@ try {
   assert.equal(rootChanges.get('sub/a.ts').code, 'M')
   assert.equal(rootChanges.get('sub/new.ts').renamedFrom, 'sub/old.ts')
   ok('subdirectory status paths and rename boundaries stay within the workspace')
+
+  // Git expands directory aliases, including macOS temp-directory symlinks and
+  // Windows short paths. Exercise aliases explicitly on every CI platform.
+  const aliases = [join(temporaryRoot, 'repo alias 测试'), join(temporaryRoot, 'sub alias 测试')]
+  const linkType = process.platform === 'win32' ? 'junction' : 'dir'
+  await symlink(await realpath(repo), aliases[0], linkType)
+  await symlink(await realpath(sub), aliases[1], linkType)
+  for (const cwd of [join(aliases[0], 'sub'), aliases[1]]) {
+    const aliasedStatus = await readGitStatus(ctx, provider, cwd, signal)
+    assert.deepEqual(aliasedStatus.files, status.files, JSON.stringify({ cwd, root: aliasedStatus.root }))
+    const modified = await file(cwd, 'a.ts')
+    assert.equal(modified.before, true)
+    assert.deepEqual(modified.hunks[0].lines, ['-nested base', '+nested edited'])
+    const deleted = await file(cwd, 'deleted.ts')
+    assert.equal(deleted.before, true)
+    assert.equal(deleted.after, false)
+    assert.deepEqual(deleted.hunks[0].lines, ['-unstaged old'])
+  }
+  const aliasedRootStatus = await readGitStatus(ctx, provider, aliases[0], signal)
+  assert.deepEqual(aliasedRootStatus.files, rootStatus.files)
+  ok('directory aliases preserve status, rename boundaries, modified diffs and deleted HEAD content')
 
   for (const [path, expected, excluded] of [
     ['[x].ts', 'bracket', 'plain'],

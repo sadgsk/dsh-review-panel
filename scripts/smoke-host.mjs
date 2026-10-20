@@ -5,6 +5,7 @@
  * guards, and the authenticated Monaco static route.
  */
 import { Readable } from 'node:stream'
+import { realpath } from 'node:fs/promises'
 import { registerApiRoutes } from '../lib/host/routes.js'
 import { registerVendorRoute } from '../lib/host/assets.js'
 import { fileUri } from '../lib/host/lsp.js'
@@ -24,7 +25,8 @@ function assert(condition, message) {
 }
 
 // ---- Fixtures ----
-const cwd = process.platform === 'win32' ? 'C:\\workspace' : '/workspace'
+// Directory identity is real; file contents and subprocesses remain fixtures.
+const cwd = await realpath(new URL('../', import.meta.url))
 const events = []
 const routes = new Map()
 const webRoutes = new Map()
