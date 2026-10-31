@@ -20,6 +20,8 @@ if (globalThis.__DSH_REVIEW_PANEL_TEST__ === true) {
     absolutePathOf,
     fuzzyScore,
     rankQuickOpen,
+    formatRevisionDate,
+    isRevisionLikeQuery,
     lspRegisterProviders,
     lspSymbols,
     lspSetDocument,

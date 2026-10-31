@@ -50,7 +50,42 @@ function rankQuickOpen(files, query, limit = 100) {
 }
 
 /**
- * One picker overlay: Quick Open, workspace search, or the command palette.
+ * Short display date for one revision: `MM-DD` for dates in the current calendar
+ * year, otherwise the full `YYYY-MM-DD`; unparseable values render as ''.
+ * @param {string} iso ISO-8601 date from git
+ * @returns {string}
+ */
+function formatRevisionDate(iso) {
+  // Git dates carry the author's own offset; show that calendar date as-is
+  // instead of shifting it into the viewer's time zone (matches `git log`).
+  const match = /^(\d{4})-(\d{2})-(\d{2})/.exec(String(iso || ''))
+  if (!match) return ''
+  const year = match[1]
+  const monthDay = match[2] + '-' + match[3]
+  return year === String(new Date().getFullYear()) ? monthDay : year + '-' + monthDay
+}
+
+/**
+ * Whether typed picker text should be offered as a raw git revision expression.
+ * Shortened to the cases where the query clearly is not a commit subject: a
+ * sha-like token, a ref path, a `HEAD~2`-style expression or an `@{...}` ref.
+ * A plain word (branch/tag name or subject text) only becomes a raw revision
+ * when no loaded commit matches it.
+ * @param {string} value typed query
+ * @returns {boolean}
+ */
+function isRevisionLikeQuery(value) {
+  const text = String(value || '').trim()
+  if (text === '') return false
+  if (/^[0-9a-f]{4,64}$/i.test(text)) return true
+  if (/^refs\//.test(text) || text.startsWith('@')) return true
+  if (/^HEAD([~^]|$)/.test(text) || /^tag[:/]/.test(text) || /^origin\//.test(text)) return true
+  return /[~^@]/.test(text) || /\//.test(text) && /^[A-Za-z0-9_.\/-]+$/.test(text)
+}
+
+/**
+ * One picker overlay: Quick Open, workspace search, the command palette, or the
+ * git-version picker (mode `revisions`).
  * @param {object} props component props
  * @returns {any} React element
  */
@@ -58,6 +93,7 @@ function PickerOverlay(props) {
   const {
     mode, t, sessionId, commands, onPickFile, onPickCommand, onClose, initialQuery,
     activePath, lineCount,
+    revisionScope, onRevisionScopeChange, onPickRevision,
   } = props
   const inputRef = React.useRef(null)
   const [query, setQuery] = React.useState(initialQuery || '')
@@ -65,8 +101,11 @@ function PickerOverlay(props) {
   const [filesTruncated, setFilesTruncated] = React.useState(false)
   const [fileError, setFileError] = React.useState(null)
   const [searchState, setSearchState] = React.useState({ status: 'idle', results: [], scanned: 0, truncated: false })
+  const [revisionState, setRevisionState] = React.useState({ status: 'idle', data: null, message: '' })
   const [activeIndex, setActiveIndex] = React.useState(0)
   const debounceRef = React.useRef(null)
+  // Optional props: the picker stays usable when the page omits the version props.
+  const scope = revisionScope === 'since' ? 'since' : 'commit'
 
   // VS Code Quick Open prefixes: `>` runs a command, `:` jumps to a line.
   const trimmed = query.trimStart()
@@ -77,7 +116,9 @@ function PickerOverlay(props) {
     ? trimmed.slice(1).trim()
     : effectiveMode === 'line' && mode === 'quickopen' ? trimmed.slice(1).trim() : query
 
-  const title = mode === 'locations' ? t(props.locationKind === 'definitions' ? 'picker.definitions.title' : 'picker.locations.title')
+  const title = mode === 'revisions'
+    ? t('picker.revisions.title')
+    : mode === 'locations' ? t(props.locationKind === 'definitions' ? 'picker.definitions.title' : 'picker.locations.title')
     : mode === 'outline' ? t('picker.outline.title')
     : mode === 'keys'
     ? t('picker.keys.title')
@@ -86,7 +127,9 @@ function PickerOverlay(props) {
     : mode === 'quickopen'
       ? t('picker.quickOpen.title')
       : mode === 'search' ? t('picker.search.title') : t('picker.commands.title')
-  const placeholder = mode === 'locations' ? t('picker.locations.placeholder')
+  const placeholder = mode === 'revisions'
+    ? t('picker.revisions.placeholder')
+    : mode === 'locations' ? t('picker.locations.placeholder')
     : mode === 'outline' ? t('picker.outline.placeholder')
     : mode === 'keys'
     ? t('picker.keys.placeholder')
@@ -118,6 +161,28 @@ function PickerOverlay(props) {
         if (cancelled) return
         setFiles([])
         setFileError(failure?.message || String(failure))
+      })
+    return () => { cancelled = true }
+  }, [mode, sessionId])
+
+  // Git versions: load the bounded revision list once per picker open; the token
+  // guard drops late responses when the overlay closes or the mode changes.
+  React.useEffect(() => {
+    if (mode !== 'revisions') return undefined
+    let cancelled = false
+    setRevisionState({ status: 'loading', data: null, message: '' })
+    if (!sessionId) {
+      setRevisionState({ status: 'error', data: null, message: t('error.noSession') })
+      return () => { cancelled = true }
+    }
+    apiGet('gitRevisions', { sessionId })
+      .then((value) => {
+        if (cancelled) return
+        setRevisionState({ status: 'ready', data: value || null, message: '' })
+      })
+      .catch((failure) => {
+        if (cancelled) return
+        setRevisionState({ status: 'error', data: null, message: failure && failure.message ? failure.message : String(failure) })
       })
     return () => { cancelled = true }
   }, [mode, sessionId])
@@ -173,19 +238,78 @@ function PickerOverlay(props) {
     return rankQuickOpen(files, prefixQuery, 100)
   }, [effectiveMode, files, prefixQuery])
 
-  const rows = effectiveMode === 'quickopen'
-    ? quickItems.map((item) => ({ key: 'f:' + item.path, primary: item.path, secondary: '' }))
-    : effectiveMode === 'search'
-      ? searchState.results.map((hit) => ({
-          key: 's:' + hit.path + ':' + hit.line + ':' + hit.column,
-          primary: hit.path + ':' + hit.line,
-          secondary: hit.text || '',
-          path: hit.path,
-          line: hit.line,
-        }))
-      : effectiveMode === 'commands' || effectiveMode === 'keys' || mode === 'locations' || mode === 'outline'
-        ? commandItems.map((item) => ({ key: 'c:' + item.id, primary: item.label, secondary: item.hint, id: item.id }))
-        : []
+  // Git versions: loaded payload, typed-query filter, scope toggle and offered rows.
+  const revisionData = revisionState.data
+  const revisionCommits = revisionData && Array.isArray(revisionData.commits) ? revisionData.commits : []
+  const revisionNeedle = query.trim().toLowerCase()
+  const revisionRaw = query.trim()
+  const revisionMatches = revisionNeedle === ''
+    ? revisionCommits
+    : revisionCommits.filter((commit) => (
+      [commit.sha, commit.short, commit.subject, commit.author, Array.isArray(commit.refs) ? commit.refs.join(' ') : '']
+        .filter(Boolean).join(' ').toLowerCase().includes(revisionNeedle)
+    ))
+  // Offer the typed expression as a raw revision unless it plainly looks like a
+  // commit-subject search that already matched rows.
+  const offerRawRevision = revisionRaw !== '' && (revisionMatches.length === 0 || isRevisionLikeQuery(revisionRaw))
+  const revisionRows = effectiveMode !== 'revisions' ? [] : [
+    ...(offerRawRevision
+      ? [{ key: 'revraw:' + revisionRaw, id: 'revraw:' + revisionRaw, primary: t('picker.revisions.raw', { query: revisionRaw }), raw: revisionRaw }]
+      : []),
+    ...revisionMatches.map((commit) => ({
+      key: 'rev:' + commit.sha,
+      id: 'rev:' + commit.sha,
+      primary: String(commit.short || commit.sha || '') + (commit.subject ? ' ' + commit.subject : ''),
+      secondary: [
+        Array.isArray(commit.refs) ? commit.refs.join(' ') : '',
+        formatRevisionDate(commit.date),
+        commit.author,
+      ].filter(Boolean).join(' · '),
+      commit,
+    })),
+  ]
+
+  /** Status copy for the revisions mode: head/branch/upstream/ahead summary. */
+  const revisionStatus = (() => {
+    if (revisionState.status === 'error') return revisionState.message || t('picker.empty')
+    if (revisionState.status !== 'ready') return t('picker.revisions.loading')
+    if (revisionData && revisionData.available === true) {
+      const head = revisionData.head
+      if (revisionData.unborn === true || !head || revisionCommits.length === 0) return t('picker.revisions.none')
+      const parts = [t('picker.revisions.head', { ref: head.short || head.sha || '' })]
+      if (head.detached === true) parts.push(t('picker.revisions.detached'))
+      else if (head.branch) {
+        parts.push(head.upstream
+          ? t('picker.revisions.branchUpstream', { branch: head.branch, upstream: head.upstream })
+          : t('picker.revisions.branch', { branch: head.branch }))
+      }
+      if (Number(head.ahead) > 0) parts.push(t('picker.revisions.ahead', { count: String(head.ahead) }))
+      if (revisionNeedle !== '' && revisionMatches.length === 0) parts.push(t('picker.revisions.empty'))
+      return parts.join(' · ')
+    }
+    return t('mode.revision.unavailable')
+  })()
+
+  /** Empty-list copy for revisions (no commits yet vs no filter match). */
+  const revisionEmptyText = revisionState.status === 'ready' && revisionData && revisionData.available === true
+    ? (revisionCommits.length === 0 ? t('picker.revisions.none') : t('picker.revisions.empty'))
+    : revisionStatus
+
+  const rows = effectiveMode === 'revisions'
+    ? revisionRows
+    : effectiveMode === 'quickopen'
+      ? quickItems.map((item) => ({ key: 'f:' + item.path, primary: item.path, secondary: '' }))
+      : effectiveMode === 'search'
+        ? searchState.results.map((hit) => ({
+            key: 's:' + hit.path + ':' + hit.line + ':' + hit.column,
+            primary: hit.path + ':' + hit.line,
+            secondary: hit.text || '',
+            path: hit.path,
+            line: hit.line,
+          }))
+        : effectiveMode === 'commands' || effectiveMode === 'keys' || mode === 'locations' || mode === 'outline'
+          ? commandItems.map((item) => ({ key: 'c:' + item.id, primary: item.label, secondary: item.hint, id: item.id }))
+          : []
 
   // Keep the active row in range while results shrink.
   React.useEffect(() => {
@@ -207,6 +331,11 @@ function PickerOverlay(props) {
     if (!row) return
     if (effectiveMode === 'quickopen') { onPickFile?.(row.primary, undefined); return }
     if (effectiveMode === 'search') { onPickFile?.(row.path, row.line); return }
+    if (effectiveMode === 'revisions') {
+      if (typeof row.raw === 'string') onPickRevision?.({ raw: row.raw })
+      else if (row.commit) onPickRevision?.(row.commit)
+      return
+    }
     onPickCommand?.(row.id)
   }
 
@@ -249,6 +378,8 @@ function PickerOverlay(props) {
             ? t('picker.search.none')
             : t('picker.search.results', { count: String(searchState.results.length), scanned: String(searchState.scanned) }) + (searchState.truncated ? ' · …' : ''))
           : searchState.status === 'error' ? t('picker.empty') : ''
+      : effectiveMode === 'revisions'
+        ? revisionStatus
       : mode === 'quickopen'
         ? (fileError || (filesTruncated ? t('picker.files.truncated') : (files ? '' : t('picker.loading'))))
         : ''
@@ -268,6 +399,25 @@ function PickerOverlay(props) {
       h('div', { className: 'drp-picker-head' },
         h('span', { className: 'drp-picker-title' }, title),
         h('button', { type: 'button', className: 'drp-icon-btn', title: t('common.close'), onClick: () => onClose?.() }, '✕')),
+      effectiveMode === 'revisions'
+        ? h('div', { className: 'drp-picker-scope' },
+            h('div', { className: 'drp-seg', role: 'group', 'aria-label': t('picker.revisions.title') },
+              h('button', {
+                type: 'button',
+                className: cx('drp-seg-btn', scope === 'commit' && 'drp-seg-btn-on'),
+                'aria-pressed': scope === 'commit',
+                title: t('picker.revisions.scope.commit.hint'),
+                onClick: () => onRevisionScopeChange?.('commit'),
+              }, t('picker.revisions.scope.commit')),
+              h('button', {
+                type: 'button',
+                className: cx('drp-seg-btn', scope === 'since' && 'drp-seg-btn-on'),
+                'aria-pressed': scope === 'since',
+                title: t('picker.revisions.scope.since.hint'),
+                onClick: () => onRevisionScopeChange?.('since'),
+              }, t('picker.revisions.scope.since'))),
+            h('span', { className: 'drp-picker-scope-label' }, t(scope === 'since' ? 'picker.revisions.scope.since.hint' : 'picker.revisions.scope.commit.hint')))
+        : null,
       h('input', {
         ref: inputRef,
         className: 'drp-picker-input',
@@ -284,10 +434,12 @@ function PickerOverlay(props) {
           ? h('div', { className: 'drp-picker-empty' },
               effectiveMode === 'line'
                 ? (lineValid ? '↵ ' + t('picker.line.title') : t('picker.line.placeholder'))
+                : effectiveMode === 'revisions'
+                  ? revisionEmptyText
                 : mode === 'search' && query.trim().length < 2 ? t('picker.search.placeholder') : t('picker.empty'))
           : rows.slice(0, 200).map((row, index) => h('div', {
               key: row.key,
-              className: cx('drp-picker-row', index === activeIndex && 'drp-picker-row-active'),
+              className: cx('drp-picker-row', index === activeIndex && 'drp-picker-row-active', row.commit ? 'drp-picker-row-rev' : row.raw !== undefined ? 'drp-picker-row-raw' : ''),
               role: 'option',
               'aria-selected': index === activeIndex,
               title: row.primary,

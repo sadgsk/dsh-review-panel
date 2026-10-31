@@ -123,14 +123,16 @@ function absolutePathOf(cwd, rel) {
 
 /**
  * One git status letter badge (M/A/D/R/C/U), coloured like VS Code's
- * git decorations.
+ * git decorations. Diff-range statuses are folded onto the four badge colours
+ * (`T` type change reads as modified, `U`/`?`/anything else as unmerged).
  * @param {{path:string, code:string}} entry git status record
  * @returns {any} React element
  */
 function GitBadge(entry) {
-  const code = entry.code === '?' ? 'U' : /^[MADRC]$/.test(entry.code) ? entry.code : '?'
+  const raw = typeof entry.code === 'string' ? entry.code : ''
+  const code = raw === 'T' ? 'M' : /^[MADRC]$/.test(raw) ? raw : 'U'
   const className = code === 'U' ? 'drp-git-other' : 'drp-git-' + code
-  return h('span', { className: cx('drp-git-badge', className), title: 'Git: ' + entry.code }, code)
+  return h('span', { className: cx('drp-git-badge', className), title: 'Git: ' + (raw || '?') }, code)
 }
 
 /**
@@ -262,7 +264,7 @@ function FileTree(props) {
   const generationRef = React.useRef(0)
   const rootRef = React.useRef(null)
   const gitBadges = React.useMemo(() => {
-    if (treeMode !== 'git' || !gitStatus || gitStatus.available !== true) return null
+    if ((treeMode !== 'git' && treeMode !== 'revision') || !gitStatus || gitStatus.available !== true) return null
     const map = new Map()
     for (const entry of Array.isArray(gitStatus.files) ? gitStatus.files : []) {
       if (!entry || typeof entry.path !== 'string') continue
@@ -480,7 +482,7 @@ function FileTree(props) {
   }
 
   const changedFiles = React.useMemo(() => {
-    if (treeMode === 'git') {
+    if (treeMode === 'git' || treeMode === 'revision') {
       const list = gitStatus && gitStatus.available === true && Array.isArray(gitStatus.files) ? gitStatus.files : []
       return list
         .map((file) => ({ ...file, rel: normalizeRel(file.path), display: file.path }))
@@ -522,7 +524,7 @@ function FileTree(props) {
           'div',
           { className: 'drp-tree-body' },
           changedFiles.length === 0
-            ? h('div', { className: 'drp-tree-empty' }, t('pill.none'))
+            ? h('div', { className: 'drp-tree-empty' }, treeMode === 'git' || treeMode === 'revision' ? t('tree.noChanges') : t('pill.none'))
             : changedFiles.map((file) => {
                 const isActive = activePath === file.rel
                 return h(
@@ -539,7 +541,7 @@ function FileTree(props) {
                   h('span', { className: 'drp-tree-twisty' }),
                   h(FileIcon, { path: file.rel, scheme: activeScheme }),
                   h('span', { className: 'drp-tree-name' }, file.rel),
-                  treeMode === 'git' ? GitBadge(file) : h(ChangeBadge, file),
+                  treeMode === 'git' || treeMode === 'revision' ? GitBadge(file) : h(ChangeBadge, file),
                 )
               }),
         )

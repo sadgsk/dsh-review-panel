@@ -308,10 +308,12 @@ function ReviewPage(props) {
   const prefetchAbortRef = React.useRef(null)
   const fileTokenRef = React.useRef(0)
   const latestTokenRef = React.useRef(0)
+  const revisionTokenRef = React.useRef(0)
   const historyRef = React.useRef({ past: [], future: [] })
   const handlersRef = React.useRef({})
   const initialisedRef = React.useRef(false)
   const autoOpenedRef = React.useRef(false)
+  const sessionRef = React.useRef(sessionId)
   const editorControlsRef = React.useRef(null)
   const fontSizeRef = React.useRef(13)
   const gitStatusRef = React.useRef(null)
@@ -362,22 +364,41 @@ function ReviewPage(props) {
   const [menuOpen, setMenuOpen] = React.useState(false)
   const [modeMenuOpen, setModeMenuOpen] = React.useState(false)
   const [gitStatus, setGitStatus] = React.useState(null)
+  const [revision, setRevision] = React.useState(null)
+  const [revisionData, setRevisionData] = React.useState(null)
+  const [revisionLoading, setRevisionLoading] = React.useState(false)
+  const [revisionRefreshToken, setRevisionRefreshToken] = React.useState(0)
+  // Bumped when historical content is left behind: Monaco keeps the same model
+  // and text, so the Host half needs an explicit re-announce to restore LSP.
+  const [documentEpoch, setDocumentEpoch] = React.useState(0)
   const [picker, setPicker] = React.useState(null)
   const [treeRefreshToken, setTreeRefreshToken] = React.useState(0)
   const [lspMissing, setLspMissing] = React.useState(null)
 
   const treeVisible = treeOpen && !narrow
   const summary = latest && latest.available ? latest.summary : null
+  // Revision mode pins every cache key to one (commit, scope) pair, so switching
+  // versions never paints another version's text or hunks.
+  const revisionKey = mode === 'revision' && revision ? 'rev:' + revision.sha + ':' + revision.scope : ''
+  const revisionSha = revision ? revision.sha : ''
+  const revisionScope = revision ? revision.scope : ''
   // Content and comparisons belong to the same announcement. During the
   // render before the refresh effect runs, the old text must not accept the
   // next snapshot's hunks.
-  const snapshotKey = String(sessionId || '') + ':' + (latest && latest.available ? String(latest.seq) : 'none')
+  const snapshotKey = String(sessionId || '') + ':' + (revisionKey || (latest && latest.available ? String(latest.seq) : 'none'))
   const fileCurrent = file && file.path === activePath && file.snapshotKey === snapshotKey
+  // Historical (= immutable commit content) mode: the diff is base → commit, and
+  // the language server must not see the old document (line numbers of the
+  // worktree no longer match).
+  const historical = mode === 'revision' && Boolean(revision) && revision.scope === 'commit'
+  const revisionLabel = revision
+    ? (revision.sha === 'HEAD' ? t('mode.commit') : t('mode.revision.with', { ref: revision.short }))
+    : t('mode.revision.pick')
   const modeLabel = mode === 'turn'
     ? (latest && latest.available
       ? t('mode.turn.withTurn', { turn: String(latest.turn) })
       : t('mode.turn') + ' · ' + t('status.mode.turn.stale'))
-    : mode === 'git' ? t('mode.git') : t('mode.code')
+    : mode === 'git' ? t('mode.git') : mode === 'revision' ? revisionLabel : t('mode.code')
 
   /** Publish a transient status line. */
   const notify = React.useCallback((text, kind) => {
@@ -513,13 +534,58 @@ function ReviewPage(props) {
     setMode(latest.available ? 'turn' : gitStatus.available ? 'git' : 'code')
   }, [latest, gitStatus])
 
-  /** Cache key for one comparison (turn snapshot or git baseline). */
+  // A different session starts from a clean revision baseline (mount is a no-op).
+  React.useEffect(() => {
+    if (sessionRef.current === sessionId) return
+    sessionRef.current = sessionId
+    setRevision(null)
+    setRevisionData(null)
+    setRevisionLoading(false)
+    // A revision belongs to the old session's repository: do not leave the page
+    // in revision mode without a resolved version.
+    if (modeRef.current === 'revision') setMode(gitStatusRef.current && gitStatusRef.current.available ? 'git' : 'code')
+  }, [sessionId])
+
+  // Revision baseline: one compare payload drives the tree's changed-file list,
+  // the status bar and the per-file rev+scope comparisons below. refreshAll
+  // bumps revisionRefreshToken so this reloads.
+  React.useEffect(() => {
+    revisionTokenRef.current += 1
+    const token = revisionTokenRef.current
+    if (mode !== 'revision' || !revisionSha || !sessionId) {
+      setRevisionData(null)
+      setRevisionLoading(false)
+      return undefined
+    }
+    setRevisionData(null)
+    setRevisionLoading(true)
+    const controller = typeof AbortController === 'function' ? new AbortController() : null
+    apiGet('gitCompare', { sessionId, rev: revisionSha, scope: revisionScope }, controller ? controller.signal : undefined)
+      .then((value) => {
+        if (token !== revisionTokenRef.current) return
+        setRevisionData(value || { available: false, reason: 'request-failed' })
+      })
+      .catch((failure) => {
+        if (token !== revisionTokenRef.current) return
+        setRevisionData({ available: false, reason: 'request-failed', message: failure && failure.message })
+      })
+      .finally(() => {
+        if (token === revisionTokenRef.current) setRevisionLoading(false)
+      })
+    return () => {
+      revisionTokenRef.current += 1
+      try { controller?.abort() } catch (error) { /* ignore */ }
+    }
+  }, [mode, sessionId, revisionSha, revisionScope, revisionRefreshToken])
+
+  /** Cache key for one comparison (turn snapshot, git baseline or git revision). */
   const diffCacheKey = React.useCallback((path) => {
     if (!path) return ''
     if (mode === 'turn') return latest && latest.available ? 'turn:' + String(latest.seq) + ':' + path : ''
     if (mode === 'git') return 'git:' + (gitStatus && gitStatus.available === true ? '1' : '0') + ':' + path
+    if (mode === 'revision') return revisionSha ? 'rev:' + revisionSha + ':' + revisionScope + ':' + path : ''
     return 'code:' + path
-  }, [mode, latest && latest.seq, latest && latest.available, gitStatus && gitStatus.available])
+  }, [mode, latest && latest.seq, latest && latest.available, gitStatus && gitStatus.available, revisionSha, revisionScope])
 
   /**
    * Apply one cached diff entry (or an error/empty marker) to the page state.
@@ -592,7 +658,10 @@ function ReviewPage(props) {
     }
     if (cached) return
     try {
-      const value = await apiGet('file', { sessionId, path }, controller ? controller.signal : undefined)
+      // Historical content comes from git at the selected commit, never from the
+      // worktree; since-scope and the other baselines read the worktree file.
+      const params = historical && revision ? { sessionId, path, rev: revision.sha } : { sessionId, path }
+      const value = await apiGet('file', params, controller ? controller.signal : undefined)
       if (token !== fileTokenRef.current) return
       const record = { ...fileRecordOf(path, value), snapshotKey }
       fileCacheRef.current.set(path, record)
@@ -611,7 +680,7 @@ function ReviewPage(props) {
       if (missing) fileCacheRef.current.set(path, record)
       setFile(record)
     }
-  }, [sessionId, snapshotKey, diffCacheKey, applyDiffEntry])
+  }, [sessionId, snapshotKey, diffCacheKey, applyDiffEntry, historical, revision && revision.sha])
 
   /** Match one active file against the turn summary's changed files. */
   const changedIndexOf = React.useCallback((path) => {
@@ -742,6 +811,45 @@ function ReviewPage(props) {
       })
     return () => { cancelled = true; controller?.abort() }
   }, [mode, activePath, snapshotKey, file, gitStatus && gitStatus.available, sessionId, diffCacheKey, applyDiffEntry, t])
+
+  // Revision baseline: compare the active file against the selected git version
+  // (`commit` = rev^1 → rev, `since` = rev → worktree). The tree's compare
+  // payload has to be ready first: without it the diff columns are meaningless.
+  React.useEffect(() => {
+    if (mode !== 'revision' || !activePath || !revision) return undefined
+    if (!fileCurrent || (file.status !== 'ready' && file.status !== 'missing')) return undefined
+    if (!revisionData) return undefined
+    if (revisionData.available !== true) {
+      applyDiffEntry({ status: 'unavailable', message: t('status.revision.unavailable') }, activePath, file.text)
+      return undefined
+    }
+    const key = diffCacheKey(activePath)
+    const cached = key ? diffCacheRef.current.get(key) : undefined
+    if (cached) {
+      applyDiffEntry(cached, activePath, file.text)
+      return undefined
+    }
+    let cancelled = false
+    const generation = cacheGenerationRef.current
+    setComparison({ status: 'loading' })
+    const controller = typeof AbortController === 'function' ? new AbortController() : null
+    apiGet('gitFile', { sessionId, path: activePath, rev: revision.sha, scope: revision.scope }, controller ? controller.signal : undefined)
+      .then((value) => {
+        if (cancelled || generation !== cacheGenerationRef.current) return
+        let entry
+        if (!value || !value.kind) entry = { status: 'error' }
+        else if (value.kind === 'text') entry = { status: 'ready', value }
+        else if (value.kind === 'deleted') entry = { status: 'deleted' }
+        else entry = { status: 'unavailable', kind: value.kind }
+        if (key) diffCacheRef.current.set(key, entry)
+        applyDiffEntry(entry, activePath, file.text)
+      })
+      .catch((failure) => {
+        if (cancelled || generation !== cacheGenerationRef.current) return
+        applyDiffEntry({ status: 'error', message: failure && failure.message }, activePath, file.text)
+      })
+    return () => { cancelled = true; controller?.abort() }
+  }, [mode, activePath, snapshotKey, file, revision && revision.sha, revision && revision.scope, revisionData, sessionId, diffCacheKey, applyDiffEntry, t])
 
   // Prefetch file text + comparison for the turn's changed files in the
   // background, so the first click on a file in the tree also renders its diff
@@ -928,6 +1036,8 @@ function ReviewPage(props) {
     void loadGitStatus()
     if (activePath) void loadFile(activePath, { force: true })
     setTreeRefreshToken((value) => value + 1)
+    // Reload the revision comparison (and therefore the tree's file list).
+    setRevisionRefreshToken((value) => value + 1)
   }, [refreshLatest, loadGitStatus, activePath, loadFile])
 
   /** Apply one editor font size (clamped) to the live editor, if any. */
@@ -939,12 +1049,72 @@ function ReviewPage(props) {
     editorControlsRef.current?.setFontSize?.(next)
   }, [])
 
-  /** Open the picker overlay in one mode. */
+  /** Open the picker overlay in one mode. The revisions picker keeps its scope. */
   const openPicker = React.useCallback((targetMode) => {
     setMenuOpen(false)
     setModeMenuOpen(false)
+    if (targetMode === 'revisions') {
+      setPicker({ mode: 'revisions', scope: revision && revision.scope === 'since' ? 'since' : 'commit' })
+      return
+    }
     setPicker({ mode: targetMode })
+  }, [revision])
+
+  /**
+   * Switch the page to one git revision baseline. `HEAD` is the one-click
+   * latest-commit shortcut; the host resolves it to the real commit.
+   * @param {object} next revision-ish record (`sha`, `short`, `subject`, `date`)
+   * @param {'commit'|'since'} [scope] comparison scope
+   */
+  const applyRevision = React.useCallback((next, scope) => {
+    if (!next || typeof next.sha !== 'string' || next.sha === '') return
+    setRevision({
+      sha: next.sha,
+      short: next.short ? String(next.short) : next.sha,
+      subject: next.subject ? String(next.subject) : '',
+      date: next.date ? String(next.date) : undefined,
+      scope: scope === 'since' ? 'since' : 'commit',
+    })
+    setMode('revision')
+    setModeTouched(true)
   }, [])
+
+  /** Change the revisions-picker scope (commit vs since) without closing it. */
+  const changeRevisionScope = React.useCallback((scope) => {
+    const next = scope === 'since' ? 'since' : 'commit'
+    setPicker((current) => (current && current.mode === 'revisions' ? { ...current, scope: next } : current))
+  }, [])
+
+  /**
+   * Apply one picked revision from the picker. A raw typed expression is
+   * resolved through the host (`gitRevisions` with `q`); failures keep the
+   * picker open and surface a warning.
+   * @param {object} picked commit record or `{raw:string}`
+   */
+  const pickRevision = React.useCallback(async (picked) => {
+    if (!picked) return
+    const scope = picker && picker.mode === 'revisions' && picker.scope === 'since' ? 'since' : 'commit'
+    if (typeof picked.raw === 'string') {
+      const raw = picked.raw.trim()
+      if (!raw) return
+      try {
+        const value = await apiGet('gitRevisions', { sessionId, q: raw })
+        const resolved = value && value.resolved
+        if (!resolved) {
+          const reason = value && (value.resolveError || value.reason)
+          notify(t('picker.revisions.resolveFailed', { message: reason || raw }), 'warn')
+          return
+        }
+        applyRevision(resolved, scope)
+        setPicker(null)
+      } catch (failure) {
+        notify(t('picker.revisions.resolveFailed', { message: failure && failure.message ? failure.message : String(failure) }), 'warn')
+      }
+      return
+    }
+    applyRevision(picked, scope)
+    setPicker(null)
+  }, [picker, sessionId, notify, t, applyRevision])
 
   // In-page shortcut fallback: when the DSH shortcut dispatcher does not consume
   // the chord (or the binding could not be registered), handle the VS Code–style
@@ -989,20 +1159,24 @@ function ReviewPage(props) {
     openPath(rel, { location: target })
   }, [openPath, activePath, file?.status])
 
-  // Host-version self-check: a stale Host half (LSP route not loaded yet) would
-  // otherwise fail silently as "no definition found".
+  // Host-version self-check: a stale Host half (LSP or git-version routes not
+  // loaded yet) would otherwise fail silently as "no definition found" or an
+  // empty version picker.
   React.useEffect(() => {
     let cancelled = false
     apiGet('config')
       .then((value) => {
         if (cancelled || !value) return
-        if (!value.features || value.features.lsp !== true || Number(value.phase) < 3) {
+        const features = value.features || {}
+        if (features.lsp !== true || Number(value.phase) < 3) {
           notify('插件 Host 端仍是旧版本（phase ' + String(value.phase) + '）：LSP 路由不可用，请重启 DSH 后再试', 'warn')
+        } else if (features.gitRevisions !== true) {
+          notify(t('error.hostOutdated'), 'warn')
         }
       })
       .catch(() => { /* config probe is optional */ })
     return () => { cancelled = true }
-  }, [notify])
+  }, [notify, t])
   // Register the language-server providers once Monaco is ready, and feed the
   // bridge the active document whenever the model changes.
   React.useEffect(() => {
@@ -1295,7 +1469,7 @@ function ReviewPage(props) {
   const monacoReady = Boolean(monaco) && !monacoError
   const modeButtonLabel = mode === 'turn'
     ? (latest && latest.available ? t('mode.turn.withTurn', { turn: String(latest.turn) }) : t('mode.turn'))
-    : mode === 'git' ? t('mode.git') : t('mode.code')
+    : mode === 'git' ? t('mode.git') : mode === 'revision' ? revisionLabel : t('mode.code')
   const comparisonCurrent = comparison && comparison.path === activePath
     && comparison.snapshotKey === snapshotKey && comparison.generation === cacheGenerationRef.current
     && comparison.key === diffCacheKey(activePath)
@@ -1313,6 +1487,17 @@ function ReviewPage(props) {
     // Monaco model's text, so do not rely only on onModelReady for teardown.
     if (deletedReady) lspClearDocument()
   }, [deletedReady, activePath])
+  // Historical (= commit) content has different line numbers than the worktree;
+  // detach the language server while it is shown. Leaving it re-announces the
+  // document through MonacoHost even when the worktree text is byte-identical
+  // (the model effect would otherwise skip the onModelReady callback).
+  const historicalRef = React.useRef(false)
+  React.useEffect(() => {
+    if (historicalRef.current === historical) return
+    historicalRef.current = historical
+    if (historical) lspClearDocument()
+    else setDocumentEpoch((value) => value + 1)
+  }, [historical])
   const tabsRow = openTabs.length > 0
     ? h('div', { className: 'drp-tabs', role: 'tablist' }, openTabs.map((path, index) => {
         const isActive = path === activePath
@@ -1347,28 +1532,75 @@ function ReviewPage(props) {
       }))
     : null
 
-  /** One diff-mode option row inside the mode dropdown. */
-  const modeOption = (id, label, disabled, hint) => h('button', {
-    key: id,
-    type: 'button',
-    role: 'menuitemradio',
-    'aria-checked': mode === id,
-    className: cx('drp-menu-item', mode === id && 'drp-menu-item-on'),
-    title: hint || label,
-    disabled,
-    onClick: disabled ? undefined : () => { setMode(id); setModeTouched(true); setModeMenuOpen(false) },
-  }, (mode === id ? '✓ ' : '   ') + label)
+  /**
+   * One diff-mode option row inside the mode dropdown.
+   * @param {string} id mode id (also the `data-drp-mode` selector)
+   * @param {string} label visible row label
+   * @param {{checked?:boolean, disabled?:boolean, hint?:string, onPick?:Function}} [options] row options
+   * @returns {any} React element
+   */
+  const modeOption = (id, label, options) => {
+    const { checked, disabled, hint, onPick } = options || {}
+    const active = typeof checked === 'boolean' ? checked : mode === id
+    return h('button', {
+      key: id,
+      type: 'button',
+      role: 'menuitemradio',
+      'data-drp-mode': id,
+      'aria-checked': active,
+      className: cx('drp-menu-item', active && 'drp-menu-item-on'),
+      title: hint || label,
+      disabled: disabled === true,
+      onClick: disabled === true ? undefined : () => {
+        if (typeof onPick === 'function') onPick()
+        else {
+          setMode(id)
+          setModeTouched(true)
+        }
+        setModeMenuOpen(false)
+      },
+    }, (active ? '✓ ' : '   ') + label)
+  }
 
-  // Diff-mode dropdown: one compact control beside the official-review button.
+  // Diff-mode dropdown: turn, uncommitted, latest commit (one click), any git
+  // version (picker), code-only.
+  const gitAvailable = gitStatus && gitStatus.available === true
+  const revisionIsHead = mode === 'revision' && Boolean(revision) && revision.sha === 'HEAD'
   const modeMenu = modeMenuOpen
     ? h('div', {
         className: 'drp-dropdown-menu',
         role: 'menu',
         onMouseDown: (event) => { try { event.stopPropagation() } catch (error) { /* ignore */ } },
       },
-        modeOption('turn', latest && latest.available ? t('mode.turn.withTurn', { turn: String(latest.turn) }) : t('mode.turn'), !(latest && latest.available), latest && latest.available ? undefined : t('mode.turn.unavailable')),
-        modeOption('git', t('mode.git'), !(gitStatus && gitStatus.available === true), gitStatus && gitStatus.available === true ? t('mode.git') : t('mode.git.unavailable')),
-        modeOption('code', t('mode.code'), false),
+        modeOption('turn', latest && latest.available ? t('mode.turn.withTurn', { turn: String(latest.turn) }) : t('mode.turn'), {
+          disabled: !(latest && latest.available),
+          hint: latest && latest.available ? undefined : t('mode.turn.unavailable'),
+        }),
+        modeOption('git', t('mode.git'), {
+          disabled: !gitAvailable,
+          hint: gitAvailable ? t('mode.git') : t('mode.git.unavailable'),
+        }),
+        modeOption('revision-head', t('mode.commit'), {
+          checked: revisionIsHead,
+          disabled: !gitAvailable,
+          hint: t('mode.commit.hint'),
+          onPick: () => applyRevision({ sha: 'HEAD', short: 'HEAD', subject: t('mode.commit') }, 'commit'),
+        }),
+        modeOption('revision', revisionLabel, {
+          checked: mode === 'revision' && Boolean(revision) && !revisionIsHead,
+          hint: t('mode.revision.pick.hint'),
+          onPick: () => {
+            if (revision && mode !== 'revision') {
+              // Already resolved once: re-enter the revision baseline directly,
+              // keeping the chosen version and scope.
+              setMode('revision')
+              setModeTouched(true)
+              return
+            }
+            openPicker('revisions')
+          },
+        }),
+        modeOption('code', t('mode.code')),
       )
     : null
 
@@ -1420,6 +1652,10 @@ function ReviewPage(props) {
         commands: pickerItems || (picker.mode === 'keys' ? buildKeyHelp(t) : paletteCommands),
         activePath,
         lineCount: fileReady ? file.lines : 0,
+        // Revisions picker contract (optional props for every other mode).
+        revisionScope: picker.mode === 'revisions' ? (picker.scope || 'commit') : undefined,
+        onRevisionScopeChange: changeRevisionScope,
+        onPickRevision: pickRevision,
         onPickFile: pickFile,
         onPickCommand: pickCommand,
         onClose: () => setPicker(null),
@@ -1457,11 +1693,18 @@ function ReviewPage(props) {
     fontSize,
     reveal,
     scheme,
+    documentEpoch,
     onCursor: (position) => cursorStore.set(position),
     onRequestLine: () => openPicker('line'),
     onRequestOutline: () => { void openOutline() },
     onModelReady: (info) => {
       if (reviewedFile && reviewedFile.missing) {
+        lspClearDocument()
+        return
+      }
+      // Historical content is a past version of the file: its line numbers do
+      // not match the worktree, so never hand it to the language server.
+      if (historical) {
         lspClearDocument()
         return
       }
@@ -1517,6 +1760,23 @@ function ReviewPage(props) {
                 : null,
             )
 
+  const revisionFileCount = revisionData && revisionData.available === true && Array.isArray(revisionData.files) ? revisionData.files.length : 0
+  const revisionStatusText = revisionLoading || !revisionData
+    ? t('status.revision.loading')
+    : revisionData.available !== true
+      ? t('status.revision.unavailable')
+      : revisionData.scope === 'since'
+        ? t('status.revision.since', {
+            base: revisionData.base ? revisionData.base.short : '',
+            count: String(revisionFileCount),
+          })
+        : t('status.revision.commit', {
+            ref: revisionData.target ? revisionData.target.short : '',
+            base: revisionData.base ? revisionData.base.short : '',
+            count: String(revisionFileCount),
+            historical: historical ? t('status.revision.historical') : t('status.revision.worktree'),
+          })
+
   const statusText = status
     ? status.text
     : file && file.status === 'loading'
@@ -1531,22 +1791,26 @@ function ReviewPage(props) {
               : t('status.mode.turn.stale'))
             : mode === 'git'
               ? t('status.mode.git')
-              : t('status.mode.code')
+              : mode === 'revision'
+                ? revisionStatusText
+                : t('status.mode.code')
 
-  const gitStatusText = mode === 'git' && gitStatus
-    ? (gitStatus.available === true
-      ? t('status.git', { count: String((gitStatus.files || []).length) })
-      : t('status.git.unavailable'))
-    : null
+  const gitStatusText = mode === 'revision'
+    ? (historical ? t('status.revision.historical') : t('status.revision.worktree'))
+    : mode === 'git' && gitStatus
+      ? (gitStatus.available === true
+        ? t('status.git', { count: String((gitStatus.files || []).length) })
+        : t('status.git.unavailable'))
+      : null
 
   const treeNode = h(FileTree, {
     sessionId,
     cwd: cwdFromStore,
     summaryFiles: summary ? summary.files : null,
-    gitStatus,
+    gitStatus: mode === 'revision' ? revisionData : gitStatus,
     changedOnly,
     activePath,
-    treeMode: mode,
+    treeMode: mode === 'revision' ? 'revision' : mode,
     onOpen: (path) => openPath(path),
     onToggleChangedOnly: (value) => setChangedOnly(value),
     reveal: null,

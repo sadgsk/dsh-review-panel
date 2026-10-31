@@ -194,6 +194,19 @@ function renderComponent(name, fn, props) {
   }
 }
 
+/** Collect every element of a stubbed render tree whose className contains one token. */
+function findElementsByClass(node, token, found = []) {
+  if (!node || typeof node !== 'object') return found
+  if (Array.isArray(node)) {
+    for (const child of node) findElementsByClass(child, token, found)
+    return found
+  }
+  const className = node.props && typeof node.props.className === 'string' ? node.props.className : ''
+  if (className.split(/\s+/).includes(token)) found.push(node)
+  for (const child of node.children || []) findElementsByClass(child, token, found)
+  return found
+}
+
 // ---- Client context stub ----
 const themeStub = { scheme: 'light', marker: null, computedBackground: '' }
 // The theme detector reads DOM markers and the rendered background; wire both to
@@ -394,6 +407,37 @@ renderComponent('PickerOverlay(search)', internals.PickerOverlay, {
   onPickCommand() {},
   onClose() {},
 })
+// Git-version picker: renders with the new (optional) revision props and stays
+// safe when the page does not pass them yet.
+const revisionsTree = renderComponent('PickerOverlay(revisions)', internals.PickerOverlay, {
+  mode: 'revisions',
+  t,
+  sessionId: 'session-1',
+  commands: [],
+  revisionScope: 'commit',
+  onRevisionScopeChange() {},
+  onPickRevision() {},
+  onPickFile() {},
+  onPickCommand() {},
+  onClose() {},
+})
+const scopeRows = findElementsByClass(revisionsTree, 'drp-picker-scope')
+assert(scopeRows.length === 1, `revision picker expected one scope row, got ${scopeRows.length}`)
+const scopeButtons = findElementsByClass(revisionsTree, 'drp-seg-btn')
+assert(scopeButtons.length === 2, `revision picker expected two scope buttons, got ${scopeButtons.length}`)
+if (scopeButtons.length === 2) {
+  assert(scopeButtons[0].props.title === 'picker.revisions.scope.commit.hint', 'commit scope hint mismatch')
+  assert(scopeButtons[1].props.title === 'picker.revisions.scope.since.hint', 'since scope hint mismatch')
+  assert(String(scopeButtons[0].props.className).includes('drp-seg-btn-on'), 'commit scope should be the default selection')
+  assert(!String(scopeButtons[1].props.className).includes('drp-seg-btn-on'), 'since scope must not be selected by default')
+}
+const revisionsDialogs = findElementsByClass(revisionsTree, 'drp-picker')
+assert(revisionsDialogs.length === 1 && revisionsDialogs[0].props['aria-label'] === 'picker.revisions.title', 'revision picker title mismatch')
+renderComponent('PickerOverlay(revisions, no version props)', internals.PickerOverlay, {
+  mode: 'revisions',
+  t,
+  sessionId: 'session-1',
+})
 renderComponent('TreeDir', internals.TreeDir, {
   relPath: '',
   rootName: 'workspace',
@@ -466,6 +510,21 @@ if (typeof internals.fuzzyScore === 'function' && typeof internals.rankQuickOpen
     notes.push('quick open ranker: ok')
   } catch (error) {
     fail(`quick open ranker threw: ${error && error.stack ? error.stack : String(error)}`)
+  }
+}
+if (typeof internals.formatRevisionDate === 'function' && typeof internals.isRevisionLikeQuery === 'function') {
+  try {
+    const year = new Date().getFullYear()
+    assert(internals.formatRevisionDate(year + '-03-04T05:06:07Z') === '03-04', 'current-year revision dates are shortened')
+    assert(internals.formatRevisionDate('1999-12-31T23:59:59Z') === '1999-12-31', 'other-year revision dates keep the year')
+    assert(internals.formatRevisionDate('not-a-date') === '', 'unparseable revision dates render empty')
+    assert(internals.isRevisionLikeQuery('b42aebd') === true, 'short sha is offered as a raw revision')
+    assert(internals.isRevisionLikeQuery('HEAD~2') === true, 'HEAD~2 is offered as a raw revision')
+    assert(internals.isRevisionLikeQuery('origin/main') === true, 'remote ref is offered as a raw revision')
+    assert(internals.isRevisionLikeQuery('fix typo') === false, 'commit-subject text is not a raw revision')
+    notes.push('revision picker helpers: ok')
+  } catch (error) {
+    fail(`revision picker helpers threw: ${error && error.stack ? error.stack : String(error)}`)
   }
 }
 if (typeof internals.absolutePathOf === 'function') {
@@ -567,9 +626,46 @@ if (typeof internals.lspRegisterProviders === 'function') {
   } catch (error) {
     fail(`lsp providers threw: ${error && error.stack ? error.stack : String(error)}`)
   }
-}if (typeof internals.STYLE_TEXT === 'string') {
+}
+
+// The ZH and EN dictionaries must expose identical key sets and contain every
+// key the git-version feature references. Evaluate the source chunk directly so
+// a missing translation fails this offline test instead of rendering a raw key.
+try {
+  const i18nSource = await readFile(join(packageDir, 'src', 'client', '10-i18n.js'), 'utf8')
+  const dictionaries = new Function(i18nSource + '\nreturn { ZH, EN }')()
+  const zhKeys = Object.keys(dictionaries.ZH || {}).sort()
+  const enKeys = Object.keys(dictionaries.EN || {}).sort()
+  const missingInEN = zhKeys.filter((key) => !enKeys.includes(key))
+  const missingInZH = enKeys.filter((key) => !zhKeys.includes(key))
+  assert(missingInEN.length === 0, 'EN dictionary is missing keys: ' + missingInEN.join(', '))
+  assert(missingInZH.length === 0, 'ZH dictionary is missing keys: ' + missingInZH.join(', '))
+  const requiredKeys = [
+    'mode.commit', 'mode.commit.hint', 'mode.revision.pick', 'mode.revision.with',
+    'mode.revision.pick.hint', 'mode.revision.unavailable',
+    'picker.revisions.title', 'picker.revisions.placeholder', 'picker.revisions.loading',
+    'picker.revisions.none', 'picker.revisions.empty', 'picker.revisions.raw',
+    'picker.revisions.resolving', 'picker.revisions.resolveFailed',
+    'picker.revisions.scope.commit', 'picker.revisions.scope.since',
+    'picker.revisions.scope.commit.hint', 'picker.revisions.scope.since.hint',
+    'picker.revisions.head', 'picker.revisions.branch', 'picker.revisions.branchUpstream',
+    'picker.revisions.detached', 'picker.revisions.ahead',
+    'status.revision.commit', 'status.revision.since', 'status.revision.loading',
+    'status.revision.unavailable', 'status.revision.historical', 'status.revision.worktree',
+    'tree.noChanges', 'error.hostOutdated',
+  ]
+  const missingRequired = requiredKeys.filter((key) => !zhKeys.includes(key) || !enKeys.includes(key))
+  assert(missingRequired.length === 0, 'git-version dictionary keys missing: ' + missingRequired.join(', '))
+  notes.push('i18n ZH/EN dictionaries: ' + zhKeys.length + ' keys, key sets identical')
+} catch (error) {
+  fail(`i18n dictionary check threw: ${error && error.stack ? error.stack : String(error)}`)
+}
+
+if (typeof internals.STYLE_TEXT === 'string') {
   assert(internals.STYLE_TEXT.includes('.drp-add-line'), 'stylesheet lost the added-line rule')
   assert(internals.STYLE_TEXT.includes('.drp-del-zone'), 'stylesheet lost the deleted-line rule')
+  assert(internals.STYLE_TEXT.includes('.drp-picker-scope'), 'stylesheet lost the revision picker scope rule')
+  assert(internals.STYLE_TEXT.includes('.drp-picker-row-raw'), 'stylesheet lost the raw-revision row rule')
   assert(!/--dsw-[a-z-]+\s*:/.test(internals.STYLE_TEXT.replace(/var\(--dsw-[a-z-]+/g, '')), 'stylesheet must not redefine --dsw-* tokens')
 }
 

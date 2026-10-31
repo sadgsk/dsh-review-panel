@@ -113,6 +113,11 @@ const STYLE_TEXT = [
   '.drp-picker-secondary{flex:1 1 auto;min-width:0;font-size:10.5px;color:var(--dsw-alias-label-secondary,#9aa4b2);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}',
   '.drp-picker-empty{padding:14px 10px;font-size:11.5px;color:var(--dsw-alias-label-secondary,#9aa4b2);text-align:center;}',
   '.drp-picker-foot{flex:0 0 auto;padding:4px 10px 6px;font-size:10px;color:var(--dsw-alias-label-secondary,#9aa4b2);border-top:1px solid var(--dsw-alias-border-l1,rgba(128,128,128,.2));}',
+  /* Git-version picker: scope toggle row, commit rows and the typed raw-revision row. */
+  '.drp-picker-scope{display:flex;align-items:center;gap:8px;flex:0 0 auto;min-width:0;padding:2px 8px 2px 10px;}',
+  '.drp-picker-scope-label{flex:1 1 auto;min-width:0;font-size:10.5px;line-height:16px;color:var(--dsw-alias-label-secondary,#9aa4b2);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}',
+  '.drp-picker-row-rev .drp-picker-secondary{font-family:var(--dsh-code-font-family,ui-monospace,SFMono-Regular,Menlo,Consolas,monospace);font-size:10px;}',
+  '.drp-picker-row-raw .drp-picker-primary{color:var(--dsw-alias-brand-primary,#4f8cff);font-family:inherit;}',
   '.drp-git-badge{flex:0 0 auto;margin-left:auto;padding-left:6px;font-family:var(--dsh-code-font-family,ui-monospace,monospace);font-size:9.5px;font-weight:600;}',
   '.drp-git-M{color:var(--dsw-alias-state-warn-primary,#d29922);}',
   '.drp-git-A{color:var(--dsw-alias-state-success-primary,#3fb950);}',

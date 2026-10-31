@@ -1,10 +1,10 @@
 {
   "name": "dsh-review-panel",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "private": true,
   "type": "module",
   "license": "MIT",
-  "description": "Cursor-style read-only code review panel for the DSH right sidebar: full-source inline diffs, workspace tree, editor tabs and VS Code-style navigation",
+  "description": "Cursor-style read-only code review panel for the DSH right sidebar: full-source inline diffs against the current turn, uncommitted changes or any git version, workspace tree, editor tabs and VS Code-style navigation",
   "keywords": ["dsh", "dsh-plugin", "deepseek-harness", "code-review", "inline-diff", "monaco", "diff"],
   "main": "./lib/index.js",
   "scripts": {

@@ -24,6 +24,8 @@ const ROUTES = {
   config: 'api/review-panel.config',
   gitStatus: 'api/review-panel.git-status',
   gitFile: 'api/review-panel.git-file',
+  gitRevisions: 'api/review-panel.git-revisions',
+  gitCompare: 'api/review-panel.git-compare',
   files: 'api/review-panel.files',
   search: 'api/review-panel.search',
   lsp: 'api/review-panel.lsp',

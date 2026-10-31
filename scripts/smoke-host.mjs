@@ -24,6 +24,20 @@ function assert(condition, message) {
   if (!condition) fail(message)
 }
 
+/** Canonical JSON text so payload comparisons ignore object key order. */
+function canonicalJson(value) {
+  if (Array.isArray(value)) return '[' + value.map(canonicalJson).join(',') + ']'
+  if (value && typeof value === 'object') {
+    return '{' + Object.keys(value).sort().map((key) => JSON.stringify(key) + ':' + canonicalJson(value[key])).join(',') + '}'
+  }
+  return JSON.stringify(value)
+}
+
+/** Assert JSON payload deep equality (fixtures are JSON-shaped payloads). */
+function assertDeep(actual, expected, message) {
+  if (canonicalJson(actual) !== canonicalJson(expected)) fail(message + ' — got ' + JSON.stringify(actual))
+}
+
 // ---- Fixtures ----
 // Directory identity is real; file contents and subprocesses remain fixtures.
 const cwd = await realpath(new URL('../', import.meta.url))
@@ -51,6 +65,43 @@ const gitDiffOutput = [
   ' c',
   '',
 ].join('\n')
+
+// ---- Revision comparison fixtures ----
+const HEAD_SHA = 'a'.repeat(40)
+const PARENT_SHA = 'b'.repeat(40)
+const ROOT_SHA = 'c'.repeat(40)
+const EMPTY_TREE_SHA = '4b825dc642cb6eb9a060e54bf8d69288fbee4904'
+const HISTORICAL_TEXT = 'old src a\n'
+const HISTORICAL_FIRST = 'first historical\n'
+const HISTORICAL_BINARY_BYTES = [0x89, 0x50, 0x4e, 0x47, 0x00, 0x01]
+const HISTORICAL_BINARY = Buffer.from(HISTORICAL_BINARY_BYTES).toString('utf8')
+const historicalSizes = new Map([['src/a.ts', 10], ['first.ts', HISTORICAL_FIRST.length], ['img/logo.png', HISTORICAL_BINARY_BYTES.length]])
+const historicalContents = new Map([['src/a.ts', HISTORICAL_TEXT], ['first.ts', HISTORICAL_FIRST], ['img/logo.png', HISTORICAL_BINARY]])
+const gitCommitRecord = (fields) => fields.join('\u0000') + '\u001e\n'
+const HEAD_RECORD = gitCommitRecord([HEAD_SHA, 'aaaaaaa', PARENT_SHA, 'Alice', '2026-10-29T10:00:00+08:00', 'HEAD -> main, origin/main, tag: v1', 'head subject'])
+const PARENT_RECORD = gitCommitRecord([PARENT_SHA, 'bbbbbbb', ROOT_SHA, 'Bob', '2026-10-28T10:00:00+08:00', '', 'parent commit'])
+const ROOT_RECORD = gitCommitRecord([ROOT_SHA, 'ccccccc', '', 'Bob', '2026-10-27T10:00:00+08:00', 'tag: root-tag', 'root commit'])
+const NAME_STATUS_MIXED = 'M\0src/a.ts\0A\0added.ts\0D\0removed.ts\0R100\0renamed-old.ts\0renamed-new.ts\0'
+const NAME_STATUS_ADDED = 'A\0src/a.ts\0A\0added.ts\0A\0removed.ts\0A\0root.ts\0'
+const NAME_STATUS_SINCE = 'M\0src/a.ts\0D\0removed.ts\0R100\0renamed-old.ts\0renamed-new.ts\0'
+const REMOVED_DIFF_OUTPUT = 'diff --git a/removed.ts b/removed.ts\n--- a/removed.ts\n+++ /dev/null\n@@ -1 +0,0 @@\n-removed source\n'
+const ADDED_DIFF_OUTPUT = 'diff --git a/added.ts b/added.ts\n--- /dev/null\n+++ b/added.ts\n@@ -0,0 +1 @@\n+added source\n'
+
+/** Fixture file existence for one canonical revision path. */
+function fixtureExistsAt(sha, path) {
+  if (sha !== HEAD_SHA && sha !== PARENT_SHA && sha !== ROOT_SHA) return false
+  if (path === 'src/a.ts' || path === 'deleted.ts') return true
+  if (path === 'added.ts' || path === 'renamed-new.ts') return sha === HEAD_SHA
+  if (path === 'removed.ts' || path === 'renamed-old.ts') return sha !== HEAD_SHA
+  if (path === 'first.ts' || path === 'img/logo.png') return sha === HEAD_SHA
+  return false
+}
+
+/** Repository path after a `<rev>:<path>` object expression. */
+function objectPath(object) {
+  const separator = String(object).indexOf(':')
+  return separator < 0 ? '' : String(object).slice(separator + 1)
+}
 
 /** Normalize a path for fixture lookups. */
 function normalized(path) {
@@ -113,23 +164,98 @@ function fakeLspSpawn(spec) {
 function fakeSpawn(spec) {
   if (spec.argv[0] === 'ts-ls') return fakeLspSpawn(spec)
   const argv = spec.argv.slice(1).join(' ')
+  const last = spec.argv[spec.argv.length - 1]
+  const fixtureCwd = spec.cwd === undefined ? '' : String(spec.cwd)
   let exitCode = 0
   let stdout = ''
   let stderr = ''
   if (argv.startsWith('rev-parse --show-toplevel')) {
-    stdout = cwd + '\n'
-  } else if (argv.startsWith('rev-parse --verify')) {
-    stdout = 'a'.repeat(40) + '\n'
-  } else if (argv.startsWith('cat-file')) {
-    const target = spec.argv[spec.argv.length - 1].slice(41)
-    exitCode = target === 'src/a.ts' || target === 'deleted.ts' ? 0 : 128
+    if (fixtureCwd.includes('not-a-repo')) {
+      exitCode = 128
+      stderr = 'fatal: not a git repository (or any of the parent directories): .git\n'
+    } else {
+      stdout = fixtureCwd + '\n'
+    }
+  } else if (argv.startsWith('rev-parse --show-object-format')) {
+    stdout = 'sha1\n'
+  } else if (argv.startsWith('rev-parse --abbrev-ref --symbolic-full-name @{upstream}')) {
+    stdout = 'origin/main\n'
+  } else if (argv.startsWith('rev-parse --abbrev-ref HEAD')) {
+    stdout = 'main\n'
+  } else if (argv.startsWith('rev-parse --verify --quiet ')) {
+    const verified = last.endsWith('^{commit}') ? last.slice(0, -'^{commit}'.length) : last
+    if (fixtureCwd.includes('unborn-fixture') || verified === 'unknown-revision') {
+      exitCode = 1
+    } else if (verified === 'HEAD' || verified === HEAD_SHA) {
+      stdout = HEAD_SHA + '\n'
+    } else if (verified === 'root' || verified === ROOT_SHA) {
+      stdout = ROOT_SHA + '\n'
+    } else if (verified === 'v1') {
+      stdout = HEAD_SHA + '\n'
+    } else if (verified === PARENT_SHA) {
+      stdout = PARENT_SHA + '\n'
+    } else if (/^[0-9a-f]{40}$/i.test(verified)) {
+      stdout = verified.toLowerCase() + '\n'
+    } else if (last.startsWith('HEAD')) {
+      stdout = HEAD_SHA + '\n'
+    } else {
+      exitCode = 1
+    }
+  } else if (argv.startsWith('rev-list --count')) {
+    stdout = '2\n'
+  } else if (argv.startsWith('log -1 ')) {
+    stdout = last === HEAD_SHA ? HEAD_RECORD : last === PARENT_SHA ? PARENT_RECORD : last === ROOT_SHA ? ROOT_RECORD : ''
+    if (stdout === '') {
+      exitCode = 128
+      stderr = 'fatal: bad object ' + last + '\n'
+    }
+  } else if (argv.startsWith('log --max-count=')) {
+    const match = /^log --max-count=(\d+)/.exec(argv)
+    stdout = [HEAD_RECORD, PARENT_RECORD, ROOT_RECORD].slice(0, match ? Number(match[1]) : 60).join('')
+  } else if (argv.startsWith('cat-file -t ')) {
+    if (historicalContents.has(objectPath(last))) stdout = 'blob\n'
+    else {
+      exitCode = 128
+      stderr = "fatal: path '" + objectPath(last) + "' does not exist\n"
+    }
+  } else if (argv.startsWith('cat-file -s ')) {
+    const target = objectPath(last)
+    if (historicalSizes.has(target)) stdout = String(historicalSizes.get(target)) + '\n'
+    else {
+      exitCode = 128
+      stderr = "fatal: path '" + target + "' does not exist\n"
+    }
+  } else if (argv.startsWith('cat-file -e ')) {
+    const separator = last.indexOf(':')
+    const sha = separator < 0 ? '' : last.slice(0, separator)
+    const target = separator < 0 ? '' : last.slice(separator + 1)
+    exitCode = fixtureExistsAt(sha, target) ? 0 : 128
+    if (exitCode !== 0) stderr = "fatal: path '" + target + "' does not exist\n"
   } else if (argv.startsWith('status')) {
     stdout = gitStatusOutput
+  } else if (argv.startsWith('show ')) {
+    if (historicalContents.has(objectPath(last))) stdout = historicalContents.get(objectPath(last))
+    else {
+      exitCode = 128
+      stderr = "fatal: path '" + objectPath(last) + "' does not exist\n"
+    }
   } else if (argv.startsWith('ls-files')) {
     const target = spec.argv[spec.argv.length - 1]
     exitCode = target === 'src/a.ts' || target === 'added.ts' ? 0 : 1
+  } else if (argv.startsWith('diff --name-status')) {
+    const revisions = spec.argv.filter((arg) => /^[0-9a-f]{40}$/i.test(arg))
+    if (revisions.length >= 2) stdout = revisions[0].toLowerCase() === EMPTY_TREE_SHA ? NAME_STATUS_ADDED : NAME_STATUS_MIXED
+    else stdout = NAME_STATUS_SINCE
   } else if (argv.startsWith('diff')) {
-    stdout = /src\/a\.ts/.test(argv) ? gitDiffOutput : /deleted\.ts/.test(argv) ? 'diff --git a/deleted.ts b/deleted.ts\n--- a/deleted.ts\n+++ /dev/null\n@@ -1 +0,0 @@\n-old source\n' : ''
+    stdout = /src\/a\.ts/.test(argv)
+      ? gitDiffOutput
+      : /removed\.ts/.test(argv)
+        ? REMOVED_DIFF_OUTPUT
+        : /added\.ts/.test(argv)
+          ? ADDED_DIFF_OUTPUT
+          : /deleted\.ts/.test(argv)
+            ? 'diff --git a/deleted.ts b/deleted.ts\n--- a/deleted.ts\n+++ /dev/null\n@@ -1 +0,0 @@\n-old source\n'
+            : ''
   } else {
     stderr = 'unexpected git invocation: ' + argv
     exitCode = 1
@@ -278,6 +404,8 @@ for (const path of [
   '/api/review-panel.config',
   '/api/review-panel.git-status',
   '/api/review-panel.git-file',
+  '/api/review-panel.git-revisions',
+  '/api/review-panel.git-compare',
   '/api/review-panel.files',
   '/api/review-panel.search',
 ]) {
@@ -388,6 +516,7 @@ notes.push('tree: ok')
 
 result = await callJson('/api/review-panel.config', {})
 assert(result.body.phase === 3 && result.body.features.git === true && result.body.features.turn === true && result.body.features.lsp === true, 'config feature flags mismatch')
+assert(result.body.features.gitRevisions === true, 'config must advertise the gitRevisions feature')
 notes.push('config: ok')
 // ---- LSP bridge (stubbed interactive language server) ----
 result = await callPost('/api/review-panel.lsp', { sessionId: 'session-1', action: 'status', languageId: 'typescript' })
@@ -445,6 +574,176 @@ assert(result.status === 200 && result.body.kind === 'binary', 'binary extension
 result = await callJson('/api/review-panel.git-file', { sessionId: 'session-1', path: '../escape.ts' })
 assert(result.status === 400, 'git file path traversal must be rejected')
 notes.push('git-file: ok')
+
+// ---- Extended git-file (revision scope) ----
+result = await callJson('/api/review-panel.git-file', { sessionId: 'session-1', path: 'src/a.ts', rev: 'HEAD', scope: 'commit' })
+assert(result.status === 200 && result.body.kind === 'text', 'rev git-file should be text')
+assert(result.body.before === true && result.body.after === true, 'rev git-file flags mismatch')
+assert(result.body.base.sha === PARENT_SHA && result.body.base.short === 'bbbbbbb', 'rev git-file base mismatch')
+assert(result.body.target.kind === 'commit' && result.body.target.sha === HEAD_SHA && result.body.target.short === 'aaaaaaa', 'rev git-file target mismatch')
+assert(result.body.hunks.length === 1, 'rev git-file hunks mismatch')
+
+result = await callJson('/api/review-panel.git-file', { sessionId: 'session-1', path: 'added.ts', rev: 'HEAD', scope: 'commit' })
+assert(result.status === 200 && result.body.kind === 'text' && result.body.before === false && result.body.after === true, 'added rev git-file flags mismatch')
+assert(result.body.hunks[0].lines.includes('+added source'), 'added rev git-file content mismatch')
+
+result = await callJson('/api/review-panel.git-file', { sessionId: 'session-1', path: 'removed.ts', rev: 'HEAD', scope: 'commit' })
+assert(result.status === 200 && result.body.before === true && result.body.after === false, 'removed rev git-file flags mismatch')
+assert(result.body.hunks[0].lines.includes('-removed source'), 'removed rev git-file content mismatch')
+
+result = await callJson('/api/review-panel.git-file', { sessionId: 'session-1', path: 'src/a.ts', rev: 'root', scope: 'commit' })
+assert(result.status === 200 && result.body.base.sha === EMPTY_TREE_SHA, 'root commit base should be the empty tree')
+
+result = await callJson('/api/review-panel.git-file', { sessionId: 'session-1', path: 'new.ts', rev: 'HEAD', scope: 'since' })
+assert(result.status === 200 && result.body.kind === 'text' && result.body.before === false && result.body.after === true, 'since rev git-file untracked flags mismatch')
+assert(result.body.target.kind === 'worktree', 'since rev git-file target must be the worktree')
+assert(result.body.hunks[0].lines.length === 1 && result.body.hunks[0].lines[0] === '+fresh line', 'since rev git-file untracked lines mismatch')
+
+result = await callJson('/api/review-panel.git-file', { sessionId: 'session-1', path: 'src/a.ts', rev: 'HEAD', scope: 'nope' })
+assert(result.status === 400 && result.body.error?.code === 'invalid-scope', 'invalid scope must be 400 invalid-scope')
+result = await callJson('/api/review-panel.git-file', { sessionId: 'session-1', path: 'src/a.ts', rev: 'bad rev' })
+assert(result.status === 400 && result.body.error?.code === 'invalid-revision', 'invalid revision syntax must be 400 invalid-revision')
+result = await callJson('/api/review-panel.git-file', { sessionId: 'session-1', path: 'src/a.ts', rev: 'unknown-revision' })
+assert(result.status === 200 && result.body.available === false && result.body.reason === 'unknown-revision', 'unknown revision git-file should be a 200 unavailable payload')
+result = await callJson('/api/review-panel.git-file', { sessionId: 'session-1', path: '../escape.ts', rev: 'HEAD' })
+assert(result.status === 400, 'rev git-file path traversal must be rejected')
+notes.push('git-file rev: ok')
+
+// ---- git-compare (commit and since scopes) ----
+result = await callJson('/api/review-panel.git-compare', { sessionId: 'session-1', rev: 'HEAD' })
+assert(result.status === 200 && result.body.available === true, 'git-compare should be available')
+assert(result.body.root === cwd, 'git-compare root mismatch')
+assert(result.body.scope === 'commit', 'git-compare default scope mismatch')
+assertDeep(result.body.base, { sha: PARENT_SHA, short: 'bbbbbbb', subject: 'parent commit', emptyTree: false }, 'git-compare base mismatch')
+assertDeep(result.body.target, { kind: 'commit', sha: HEAD_SHA, short: 'aaaaaaa', subject: 'head subject' }, 'git-compare target mismatch')
+assertDeep(result.body.files, [
+  { path: 'src/a.ts', code: 'M' },
+  { path: 'added.ts', code: 'A' },
+  { path: 'removed.ts', code: 'D' },
+  { path: 'renamed-new.ts', code: 'R', renamedFrom: 'renamed-old.ts' },
+], 'git-compare files mismatch')
+assert(result.body.truncated === false, 'git-compare truncated mismatch')
+
+result = await callJson('/api/review-panel.git-compare', { sessionId: 'session-1', rev: 'root', scope: 'commit' })
+assert(result.status === 200 && result.body.available === true, 'root git-compare should be available')
+assertDeep(result.body.base, { sha: EMPTY_TREE_SHA, short: '4b825dc', subject: 'empty tree', emptyTree: true }, 'root git-compare base must be the empty tree')
+assertDeep(result.body.target, { kind: 'commit', sha: ROOT_SHA, short: 'ccccccc', subject: 'root commit' }, 'root git-compare target mismatch')
+assertDeep(result.body.files, [
+  { path: 'src/a.ts', code: 'A' },
+  { path: 'added.ts', code: 'A' },
+  { path: 'removed.ts', code: 'A' },
+  { path: 'root.ts', code: 'A' },
+], 'root git-compare files must be all additions')
+
+result = await callJson('/api/review-panel.git-compare', { sessionId: 'session-1', rev: 'HEAD', scope: 'since' })
+assert(result.status === 200 && result.body.available === true, 'since git-compare should be available')
+assert(result.body.scope === 'since', 'since git-compare scope mismatch')
+assertDeep(result.body.base, { sha: HEAD_SHA, short: 'aaaaaaa', subject: 'head subject', emptyTree: false }, 'since git-compare base mismatch')
+assertDeep(result.body.target, { kind: 'worktree' }, 'since git-compare target must be the worktree')
+assertDeep(result.body.files, [
+  { path: 'src/a.ts', code: 'M' },
+  { path: 'removed.ts', code: 'D' },
+  { path: 'renamed-new.ts', code: 'R', renamedFrom: 'renamed-old.ts' },
+  { path: 'new.ts', code: 'A' },
+], 'since git-compare must include untracked worktree files')
+
+result = await callJson('/api/review-panel.git-compare', { sessionId: 'session-1' })
+assert(result.status === 400 && result.body.error?.code === 'invalid-revision', 'missing rev must be 400 invalid-revision')
+result = await callJson('/api/review-panel.git-compare', { sessionId: 'session-1', rev: 'bad rev' })
+assert(result.status === 400 && result.body.error?.code === 'invalid-revision', 'invalid rev syntax must be 400 invalid-revision')
+result = await callJson('/api/review-panel.git-compare', { sessionId: 'session-1', rev: 'HEAD', scope: 'nope' })
+assert(result.status === 400 && result.body.error?.code === 'invalid-scope', 'unknown compare scope must be 400 invalid-scope')
+result = await callJson('/api/review-panel.git-compare', { sessionId: 'session-1', rev: 'unknown-revision' })
+assert(result.status === 200 && result.body.available === false && result.body.reason === 'unknown-revision', 'unknown rev compare payload mismatch')
+result = await callJson('/api/review-panel.git-compare', { sessionId: 'nope', rev: 'HEAD' })
+assert(result.status === 404, 'git-compare for unknown session should be 404')
+notes.push('git-compare: ok')
+
+// ---- git-revisions (picker data) ----
+result = await callJson('/api/review-panel.git-revisions', { sessionId: 'session-1' })
+assert(result.status === 200 && result.body.available === true, 'git-revisions should be available')
+assert(result.body.root === cwd && result.body.unborn === false, 'git-revisions head coordinates mismatch')
+assertDeep(result.body.head, {
+  sha: HEAD_SHA,
+  short: 'aaaaaaa',
+  subject: 'head subject',
+  date: '2026-10-29T10:00:00+08:00',
+  branch: 'main',
+  upstream: 'origin/main',
+  ahead: 2,
+  detached: false,
+}, 'git-revisions head payload mismatch')
+assert(result.body.commits.length === 3, 'git-revisions commit list mismatch')
+assertDeep(result.body.commits[0], {
+  sha: HEAD_SHA,
+  short: 'aaaaaaa',
+  subject: 'head subject',
+  author: 'Alice',
+  date: '2026-10-29T10:00:00+08:00',
+  parents: [PARENT_SHA],
+  refs: ['HEAD -> main', 'origin/main', 'tag: v1'],
+}, 'git-revisions commit entry mismatch')
+assert(result.body.commits[1].sha === PARENT_SHA && result.body.commits[2].sha === ROOT_SHA, 'git-revisions commit order mismatch')
+assert(result.body.resolved === undefined && result.body.resolveError === undefined, 'git-revisions must omit resolution fields without q')
+
+result = await callJson('/api/review-panel.git-revisions', { sessionId: 'session-1', q: 'v1' })
+assert(result.status === 200 && result.body.resolved?.sha === HEAD_SHA, 'git-revisions raw tag resolution mismatch')
+assert(result.body.resolveError === undefined, 'resolved tag must not carry resolveError')
+
+result = await callJson('/api/review-panel.git-revisions', { sessionId: 'session-1', q: 'root' })
+assert(result.status === 200 && result.body.resolved?.sha === ROOT_SHA, 'git-revisions raw root resolution mismatch')
+assertDeep(result.body.resolved.parents, [], 'root resolution parents mismatch')
+
+result = await callJson('/api/review-panel.git-revisions', { sessionId: 'session-1', q: 'unknown-revision' })
+assert(result.status === 200 && result.body.available === true && result.body.resolveError === 'Unknown git revision.', 'unknown q must be a 200 resolveError')
+assert(result.body.resolved === undefined, 'unknown q must not include a resolved commit')
+
+result = await callJson('/api/review-panel.git-revisions', { sessionId: 'session-1', q: 'bad rev' })
+assert(result.status === 200 && result.body.resolveError === 'Invalid git revision.', 'invalid q must be a 200 resolveError')
+
+result = await callJson('/api/review-panel.git-revisions', { sessionId: 'session-1', limit: 1 })
+assert(result.status === 200 && result.body.commits.length === 1, 'git-revisions limit coordinate mismatch')
+
+result = await callJson('/api/review-panel.git-revisions', { sessionId: 'nope' })
+assert(result.status === 404, 'git-revisions for unknown session should be 404')
+notes.push('git-revisions: ok')
+
+// ---- file at a revision ----
+result = await callJson('/api/review-panel.file', { sessionId: 'session-1', path: 'src/a.ts', rev: 'HEAD' })
+assert(result.status === 200 && result.body.kind === 'text', 'rev file should be text')
+assert(result.body.text === HISTORICAL_TEXT && result.body.lines === 1, 'rev file text mismatch')
+assert(result.body.version === HEAD_SHA, 'rev file version must be the resolved sha')
+assert(result.body.path === 'src/a.ts' && result.body.display === 'src/a.ts', 'rev file path fields mismatch')
+
+result = await callJson('/api/review-panel.file', { sessionId: 'session-1', path: 'img/logo.png', rev: 'HEAD' })
+assert(result.status === 200 && result.body.kind === 'binary' && result.body.bytes === HISTORICAL_BINARY_BYTES.length, 'rev file binary mismatch')
+
+result = await callJson('/api/review-panel.file', { sessionId: 'session-1', path: 'gone-at-rev.ts', rev: 'HEAD' })
+assert(result.status === 404 && result.body.error?.code === 'not-found', 'file missing at revision must be 404 not-found')
+result = await callJson('/api/review-panel.file', { sessionId: 'session-1', path: 'src/a.ts', rev: 'unknown-revision' })
+assert(result.status === 400 && result.body.error?.code === 'invalid-revision', 'unknown rev file must be 400 invalid-revision')
+result = await callJson('/api/review-panel.file', { sessionId: 'session-1', path: 'src/a.ts', rev: 'bad rev' })
+assert(result.status === 400 && result.body.error?.code === 'invalid-revision', 'invalid rev file must be 400 invalid-revision')
+result = await callJson('/api/review-panel.file', { sessionId: 'session-1', path: '../secrets.ts', rev: 'HEAD' })
+assert(result.status === 400, 'rev file path traversal must be rejected')
+notes.push('file rev: ok')
+
+// ---- repository availability (not-git and unborn) ----
+const recordedCwd = session.header.cwd
+try {
+  session.header.cwd = '/not-a-repo/project'
+  result = await callJson('/api/review-panel.git-compare', { sessionId: 'session-1', rev: 'HEAD' })
+  assert(result.status === 200 && result.body.available === false && result.body.reason === 'not-git', 'git-compare outside a repo must report not-git')
+  result = await callJson('/api/review-panel.git-revisions', { sessionId: 'session-1' })
+  assert(result.status === 200 && result.body.available === false && result.body.reason === 'not-git', 'git-revisions outside a repo must report not-git')
+  session.header.cwd = '/unborn-fixture'
+  result = await callJson('/api/review-panel.git-revisions', { sessionId: 'session-1' })
+  assert(result.status === 200 && result.body.available === true && result.body.unborn === true, 'unborn repo must report unborn')
+  assert(result.body.head === null && result.body.commits.length === 0, 'unborn repo must have no head or commits')
+} finally {
+  session.header.cwd = recordedCwd
+}
+notes.push('git repository availability: ok')
 
 // ---- Workspace index / search ----
 result = await callJson('/api/review-panel.files', { sessionId: 'session-1' })

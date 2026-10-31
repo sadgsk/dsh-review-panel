@@ -550,7 +550,7 @@ function createDiffRenderer(monaco, editor) {
  * @returns {any} React element
  */
 function MonacoHost(props) {
-  const { monaco, file, sessionId, regions, wrap, minimap, reveal, scheme, fontSize, onCursor, onReady, onError, onRequestLine, onRequestOutline, onModelReady, onLsp } = props
+  const { monaco, file, sessionId, regions, wrap, minimap, reveal, scheme, fontSize, documentEpoch, onCursor, onReady, onError, onRequestLine, onRequestOutline, onModelReady, onLsp } = props
   const hostRef = React.useRef(null)
   const editorRef = React.useRef(null)
   const rendererRef = React.useRef(null)
@@ -734,7 +734,7 @@ function MonacoHost(props) {
     } catch (error) {
       log('error', 'monaco model switch failed', error)
     }
-  }, [monaco, sessionId, file && file.path, file && file.text, file && file.language, file && file.kind, file && file.missing])
+  }, [monaco, sessionId, file && file.path, file && file.text, file && file.language, file && file.kind, file && file.missing, documentEpoch])
 
   // Inline diff decorations.
   React.useEffect(() => {

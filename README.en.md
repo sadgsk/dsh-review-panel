@@ -7,12 +7,13 @@
 
 ## What is this
 
-`dsh-review-panel` brings a **Cursor-style code review experience** to DeepSeek Harness. It adds a read-only **Code Review** tab to the official right sidebar, showing what the agent changed in this turn as full source files with line-level inline diffs — and it brings the **VS Code shortcuts** you already know.
+`dsh-review-panel` brings a **Cursor-style code review experience** to DeepSeek Harness. It adds a read-only **Code Review** tab to the official right sidebar, showing what changed in this agent turn, in the uncommitted worktree or in any historical git version as full source files with line-level inline diffs — and it brings the **VS Code shortcuts** you already know.
 
 DSH's builtin review shows one hunk at a time; this panel gives you the **whole file** — added lines tinted across the full row, deleted lines kept inline with their original line numbers — plus a file tree, editor tabs and keyboard-driven navigation, so reviewing feels like working in an editor.
 
 - **Full source + inline line-level diffs** — added lines tinted, deleted lines inline with original line numbers
-- **Three diff baselines** — `Agent turn` / `Git uncommitted` / `Code only`, switchable in one click
+- **Four diff baselines** — `Agent turn` / `Git uncommitted` / `Any git version` / `Code only`, switchable in one click
+- **Diff against any git version** — pick any historical commit (or type a branch, tag, `HEAD~2`, …) and review exactly what that commit changed; switch to "changes since this version" to see the cumulative diff up to the current worktree. Especially handy for reviewing the last round right after pushing
 - **VS Code-style workspace** — file tree, editor tabs, Quick Open (`Ctrl+P`), command palette, workspace search
 - **Language-server navigation** — `F12` definition, `Shift+F12` references, hover, document outline, read-only diagnostics
 - **Read-only by design** — never writes files, never runs git mutations, never installs anything silently
@@ -41,6 +42,18 @@ Restart DSH when prompted. Then click **+** in the right sidebar and choose **Co
 ![Open Code Review from the right-sidebar + menu](docs/images/entry-plus-menu.png)
 
 You can also open it from the "本轮修改" pill above the chat input.
+
+## Review changes from a historical git version
+
+The toolbar's baseline dropdown offers more than `Agent turn` and `Git uncommitted` — you can compare against any git version:
+
+- **Latest commit**: one click to review what the most recent commit (`HEAD`) changed. Right after a push, this is exactly the last round's diff.
+- **Git version…**: opens the commit history (sha, subject, branch/tag refs and date). After you pick a commit:
+  - **This version's diff** (default) — what that commit introduced relative to its previous version (first parent). Works even when the worktree is clean or has moved on.
+  - **Changes since this version** — the cumulative diff from that version up to the current worktree (committed, staged, unstaged and untracked changes included).
+  - The input below the list also accepts any revision expression (full/short sha, branch, tag, `HEAD~2`, …).
+
+Historical content comes from git, so language-server navigation such as `F12` is unavailable in "this version's diff" mode; it resumes automatically on the worktree baselines.
 
 ## Shortcuts
 
