@@ -13,6 +13,10 @@ const lspRuntime = {
   monaco: null,
   model: null,
   host: null,
+  // Historical (= git revision) content: navigation/hover keep working against
+  // the overlaid text, but diagnostics are suppressed because the server would
+  // mix that snapshot with the current worktree project.
+  historical: false,
   missing: null,
   registered: false,
   unsupported: null,
@@ -99,6 +103,7 @@ function lspClearDocument(model) {
   lspRuntime.model = null
   lspRuntime.path = null
   lspRuntime.text = null
+  lspRuntime.historical = false
 }
 
 function lspDispose() {
@@ -258,9 +263,14 @@ function lspFailureMessage(response, fallback) {
 
 /**
  * Remember the active document (called whenever the Monaco model changes).
+ * Historical (git revision) content is a first-class document for navigation:
+ * the Host bridge overlays the shown text, so F12 / references / hover / symbols
+ * work against the snapshot. Diagnostics stay off there (see `historical`).
  * @param {object} info document facts plus page callbacks
  */
 function lspSetDocument(info) {
+  const historical = info.historical === true
+  const wasHistorical = lspRuntime.historical
   const changed = lspRuntime.sessionId !== info.sessionId || lspRuntime.cwd !== info.cwd || lspRuntime.languageId !== info.languageId || lspRuntime.model !== info.model || lspRuntime.path !== info.path || lspRuntime.text !== info.text
   if (lspRuntime.languageId !== info.languageId) {
     lspRuntime.missing = null
@@ -274,6 +284,13 @@ function lspSetDocument(info) {
   lspRuntime.languageId = info.languageId
   lspRuntime.monaco = info.monaco
   lspRuntime.model = info.model
+  lspRuntime.historical = historical
+  if (historical) {
+    // A historical snapshot is never mixed with the worktree project for
+    // diagnostics; navigation still uses the overlaid document text.
+    stopLspDiagnostics()
+    clearLspMarkers()
+  }
   if (changed) {
     lspRuntime.diagOpenedAt = Date.now()
     lspRuntime.diagLastSignature = null
@@ -281,6 +298,13 @@ function lspSetDocument(info) {
     clearLspMarkers()
     clearForeignDiagnosticMarkers(info.monaco, info.model)
     disableBuiltinTsValidation(info.monaco)
+    if (!historical) scheduleLspDiagnostics()
+    return
+  }
+  // Same text/model but the snapshot kind changed (e.g. a commit version whose
+  // content equals the worktree): re-arm polling only when leaving historical.
+  if (wasHistorical && !historical) {
+    stopLspDiagnostics()
     scheduleLspDiagnostics()
   }
 }
@@ -382,6 +406,8 @@ function lspDiagnosticsVisible() {
 
 /** Poll diagnostics shortly after the document changed. */
 function scheduleLspDiagnostics(attempt = 0, pollId) {
+  // Historical snapshots never publish diagnostics (see `lspRuntime.historical`).
+  if (lspRuntime.historical) return
   if (pollId === undefined) {
     stopLspDiagnostics()
     pollId = lspRuntime.diagnosticsPollId
@@ -405,6 +431,7 @@ function scheduleLspDiagnostics(attempt = 0, pollId) {
 
 /** Fetch diagnostics and publish them as Monaco markers. */
 async function refreshLspDiagnostics(attempt = 0, pollId = lspRuntime.diagnosticsPollId) {
+  if (lspRuntime.historical) return
   if (!lspRuntime.sessionId || !lspRuntime.model || !lspDiagnosticsVisible() || pollId !== lspRuntime.diagnosticsPollId) return
   const model = lspRuntime.model
   const generation = lspRuntime.generation

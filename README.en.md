@@ -53,7 +53,11 @@ The toolbar's baseline dropdown offers more than `Agent turn` and `Git uncommitt
   - **Changes since this version** — the cumulative diff from that version up to the current worktree (committed, staged, unstaged and untracked changes included).
   - The input below the list also accepts any revision expression (full/short sha, branch, tag, `HEAD~2`, …).
 
-Historical content comes from git, so language-server navigation such as `F12` is unavailable in "this version's diff" mode; it resumes automatically on the worktree baselines.
+Historical content comes from git. `F12`, find references, hover and the document outline keep working on that snapshot text (a cross-file jump opens the target file at the selected version; its line number comes from the current worktree and may be off); diagnostics stay hidden in this mode so an old snapshot is never mixed with the current project. Worktree baselines restore diagnostics automatically.
+
+## Session switching
+
+The review page remembers each conversation's workspace state: after switching sessions and back, the open files, tabs and diff baseline (including the selected git version) are still there instead of being reset.
 
 ## Shortcuts
 

@@ -8,6 +8,50 @@ const runtimeState = {
   tabs: undefined,
 }
 
+/**
+ * Per-session page state that survives the right-sidebar tab body unmounting.
+ * DSH tears down the previous conversation's sidebar tab bodies when the user
+ * switches sessions (and may unmount inactive tab bodies when switching tabs);
+ * without this store every remount started from scratch, so a session switch
+ * looked like "all open files closed + git version reset". Memory only: the
+ * stored paths belong to a live workspace/commit, never to a DSH restart.
+ */
+const pageSessionStore = new Map()
+/** Upper bound of remembered sessions (LRU eviction keeps memory bounded). */
+const PAGE_SESSION_STORE_LIMIT = 40
+
+/**
+ * Read one session's remembered page state (LRU-touched).
+ * @param {string} sessionId session identity
+ * @returns {object | null} remembered state or null
+ */
+function rememberedPageState(sessionId) {
+  const key = sessionId ? String(sessionId) : ''
+  if (!key) return null
+  const value = pageSessionStore.get(key)
+  if (!value) return null
+  pageSessionStore.delete(key)
+  pageSessionStore.set(key, value)
+  return value
+}
+
+/**
+ * Remember one session's page state for the next mount of this tab body.
+ * @param {string} sessionId session identity
+ * @param {object | null} state page state snapshot
+ */
+function rememberPageState(sessionId, state) {
+  const key = sessionId ? String(sessionId) : ''
+  if (!key || !state) return
+  pageSessionStore.delete(key)
+  pageSessionStore.set(key, state)
+  while (pageSessionStore.size > PAGE_SESSION_STORE_LIMIT) {
+    const oldest = pageSessionStore.keys().next()
+    if (oldest.done) break
+    pageSessionStore.delete(oldest.value)
+  }
+}
+
 /** The client plugin context captured by `apply` (used for optional event subscriptions). */
 const globalCtxRef = { current: null }
 
@@ -314,6 +358,12 @@ function ReviewPage(props) {
   const initialisedRef = React.useRef(false)
   const autoOpenedRef = React.useRef(false)
   const sessionRef = React.useRef(sessionId)
+  /** Latest render snapshot of the state that must survive this body's unmount. */
+  const pageSnapshotRef = React.useRef(null)
+  /** One-shot flag: the restored active file still has to be read from the Host. */
+  const restoreLoadRef = React.useRef(false)
+  /** Snapshot-effect bookkeeping: the last (snapshotKey, path) it force-loaded. */
+  const lastSnapshotLoadRef = React.useRef(null)
   const editorControlsRef = React.useRef(null)
   const fontSizeRef = React.useRef(13)
   const gitStatusRef = React.useRef(null)
@@ -368,8 +418,9 @@ function ReviewPage(props) {
   const [revisionData, setRevisionData] = React.useState(null)
   const [revisionLoading, setRevisionLoading] = React.useState(false)
   const [revisionRefreshToken, setRevisionRefreshToken] = React.useState(0)
-  // Bumped when historical content is left behind: Monaco keeps the same model
-  // and text, so the Host half needs an explicit re-announce to restore LSP.
+  // Bumped when the shown snapshot kind changes (worktree ↔ historical commit):
+  // Monaco keeps the same model/text, so the Host half needs an explicit
+  // re-announce to hand the language server the right document.
   const [documentEpoch, setDocumentEpoch] = React.useState(0)
   const [picker, setPicker] = React.useState(null)
   const [treeRefreshToken, setTreeRefreshToken] = React.useState(0)
@@ -399,6 +450,22 @@ function ReviewPage(props) {
       ? t('mode.turn.withTurn', { turn: String(latest.turn) })
       : t('mode.turn') + ' · ' + t('status.mode.turn.stale'))
     : mode === 'git' ? t('mode.git') : mode === 'revision' ? revisionLabel : t('mode.code')
+
+  // Render-synchronous snapshot of everything worth restoring after this tab
+  // body unmounts (session switch, tab switch, tab close).
+  sessionRef.current = sessionId
+  pageSnapshotRef.current = {
+    openTabs: openTabs.slice(),
+    activePath,
+    mode,
+    modeTouched,
+    revision: revision ? { ...revision } : null,
+    changedOnly,
+    treeOpen,
+    treeWidth,
+    initialised: initialisedRef.current,
+    autoOpened: autoOpenedRef.current,
+  }
 
   /** Publish a transient status line. */
   const notify = React.useCallback((text, kind) => {
@@ -524,26 +591,81 @@ function ReviewPage(props) {
     void loadGitStatus()
   }, [loadGitStatus])
 
-  // Initial diff baseline: TURN when the Host recorded a turn, else GIT when the
-  // workspace is a repository, else code-only.
+  // Initial baseline: restore this session's remembered workspace (tabs, active
+  // file, diff baseline, git version) or fall back to TURN when the Host recorded
+  // a turn, else GIT when the workspace is a repository, else code-only. The
+  // right-sidebar tab body is remounted whenever the user switches sessions, so
+  // this is the only place the previous visit's state comes back.
   React.useEffect(() => {
     if (initialisedRef.current) return
     if (!latest || latest.loaded !== true) return
     if (gitStatus === null) return
     initialisedRef.current = true
-    setMode(latest.available ? 'turn' : gitStatus.available ? 'git' : 'code')
-  }, [latest, gitStatus])
+    const gitAvailable = gitStatus.available === true
+    const defaultMode = () => (latest.available ? 'turn' : gitAvailable ? 'git' : 'code')
+    // The Host probes can be slow: the user may already have opened a file or
+    // picked a baseline during the remount window. That choice wins over the
+    // remembered snapshot (which was captured before this mount).
+    const interacted = Boolean(activePath) || openTabs.length > 0 || revision !== null || modeTouched === true || mode !== 'code'
+    if (interacted) {
+      if (!modeTouched) setMode(defaultMode())
+      // Never let the turn's auto-open replace the file the user just picked.
+      autoOpenedRef.current = true
+      return
+    }
+    const saved = rememberedPageState(sessionId)
+    if (!saved) {
+      setMode(defaultMode())
+      return
+    }
+    const modes = ['turn', 'git', 'revision', 'code']
+    let nextMode = modes.includes(saved.mode) ? saved.mode : ''
+    if (!nextMode) nextMode = defaultMode()
+    if (nextMode === 'turn' && !latest.available) nextMode = gitAvailable ? 'git' : 'code'
+    if (nextMode === 'git' && !gitAvailable) nextMode = 'code'
+    let nextRevision = null
+    if (nextMode === 'revision') {
+      const record = saved.revision
+      if (gitAvailable && record && typeof record.sha === 'string' && record.sha !== '') {
+        nextRevision = {
+          sha: record.sha,
+          short: typeof record.short === 'string' && record.short !== '' ? record.short : record.sha,
+          subject: typeof record.subject === 'string' ? record.subject : '',
+          date: typeof record.date === 'string' ? record.date : undefined,
+          scope: record.scope === 'since' ? 'since' : 'commit',
+        }
+      } else {
+        // A git version belongs to a repository: never restore it without one.
+        nextMode = gitAvailable ? 'git' : 'code'
+      }
+    }
+    const tabs = Array.isArray(saved.openTabs) ? saved.openTabs.filter((path) => typeof path === 'string' && path !== '') : []
+    const active = typeof saved.activePath === 'string' && saved.activePath !== '' ? saved.activePath : null
+    if (active && !tabs.includes(active)) tabs.push(active)
+    setOpenTabs(tabs)
+    setActivePath(active)
+    setChangedOnly(saved.changedOnly === true)
+    if (typeof saved.treeOpen === 'boolean') setTreeOpen(saved.treeOpen)
+    const width = Number(saved.treeWidth)
+    if (Number.isFinite(width)) setTreeWidth(Math.min(TREE_WIDTH_MAX, Math.max(TREE_WIDTH_MIN, Math.round(width))))
+    autoOpenedRef.current = saved.autoOpened === true || Boolean(active)
+    // A restored file did not go through openPath(), so it still has to be
+    // read from the Host once the final baseline announcement is known.
+    restoreLoadRef.current = Boolean(active)
+    setRevision(nextRevision)
+    setMode(nextMode)
+    setModeTouched(saved.modeTouched === true)
+  }, [latest, gitStatus, sessionId])
 
-  // A different session starts from a clean revision baseline (mount is a no-op).
-  React.useEffect(() => {
-    if (sessionRef.current === sessionId) return
-    sessionRef.current = sessionId
-    setRevision(null)
-    setRevisionData(null)
-    setRevisionLoading(false)
-    // A revision belongs to the old session's repository: do not leave the page
-    // in revision mode without a resolved version.
-    if (modeRef.current === 'revision') setMode(gitStatusRef.current && gitStatusRef.current.available ? 'git' : 'code')
+  // Persist the page's workspace state before this tab body unmounts. DSH
+  // unmounts the previous conversation's sidebar tab bodies on a session switch,
+  // so the next mount of the same session restores its tabs, active file and git
+  // version instead of starting from scratch.
+  React.useEffect(() => () => {
+    const state = pageSnapshotRef.current
+    if (!state) return
+    if (state.initialised !== true && state.openTabs.length === 0 && !state.activePath) return
+    rememberPageState(sessionRef.current, state)
   }, [sessionId])
 
   // Revision baseline: one compare payload drives the tree's changed-file list,
@@ -723,8 +845,29 @@ function ReviewPage(props) {
     cacheGenerationRef.current += 1
     fileCacheRef.current = new Map()
     diffCacheRef.current = new Map()
-    if (activePath) void loadFile(activePath, { force: true })
+    if (activePath) {
+      lastSnapshotLoadRef.current = { key: snapshotKey, path: activePath }
+      void loadFile(activePath, { force: true })
+    }
   }, [snapshotKey, activePath, loadFile])
+
+  // The baseline restore puts the remembered active file in place without going
+  // through openPath(); read it once here, from the render that already carries
+  // the restored baseline/revision (so historical content is read at its commit).
+  // The snapshot effect above may already have force-loaded that exact file while
+  // settling the restored revision (which changes snapshotKey); never fetch twice.
+  React.useEffect(() => {
+    if (!restoreLoadRef.current) return
+    if (!activePath) return
+    restoreLoadRef.current = false
+    const already = lastSnapshotLoadRef.current
+    if (already && already.key === snapshotKey && already.path === activePath) return
+    snapshotRef.current = snapshotKey
+    cacheGenerationRef.current += 1
+    fileCacheRef.current = new Map()
+    diffCacheRef.current = new Map()
+    void loadFile(activePath, { force: true })
+  }, [activePath, snapshotKey, loadFile])
 
   // A mode switch invalidates the current decorations before the matching
   // baseline effect repaints from cache in the same commit.
@@ -1185,10 +1328,17 @@ function ReviewPage(props) {
       notify: (text, kind) => notify(text, kind),
       onMissing: (missing) => setLspMissing(missing),
       onUnsupported: (language) => notify(t('lsp.unsupported', { language }), 'warn'),
-      openLocation: (path, line, column, range) => pickFile(path, line, column, range),
+      openLocation: (path, line, column, range) => {
+        // Historical content is shown at its commit, but navigation locations
+        // for other files are computed against the worktree; the reveal line is
+        // therefore only approximate there.
+        const crossFile = historical && normalizeRel(path) !== activePath
+        pickFile(path, line, column, range)
+        if (crossFile) notify(t('lsp.historicalCrossFile'), 'info')
+      },
       showLocations: (locations, kind) => { setMenuOpen(false); setPicker({ mode: 'locations', locations, kind }) },
     })
-  }, [monaco, notify, pickFile])
+  }, [monaco, notify, pickFile, historical, activePath, t])
 
   /** One click = confirmation: send the install request to the Agent. */
   const installLspFromAgent = React.useCallback(async () => {
@@ -1487,16 +1637,15 @@ function ReviewPage(props) {
     // Monaco model's text, so do not rely only on onModelReady for teardown.
     if (deletedReady) lspClearDocument()
   }, [deletedReady, activePath])
-  // Historical (= commit) content has different line numbers than the worktree;
-  // detach the language server while it is shown. Leaving it re-announces the
-  // document through MonacoHost even when the worktree text is byte-identical
-  // (the model effect would otherwise skip the onModelReady callback).
+  // Historical (= commit) content is a real document for the language server:
+  // the Host bridge overlays the shown text, so navigation keeps working. Both
+  // directions re-announce it through MonacoHost (the model text can be
+  // byte-identical even when the snapshot kind changed).
   const historicalRef = React.useRef(false)
   React.useEffect(() => {
     if (historicalRef.current === historical) return
     historicalRef.current = historical
-    if (historical) lspClearDocument()
-    else setDocumentEpoch((value) => value + 1)
+    setDocumentEpoch((value) => value + 1)
   }, [historical])
   const tabsRow = openTabs.length > 0
     ? h('div', { className: 'drp-tabs', role: 'tablist' }, openTabs.map((path, index) => {
@@ -1702,15 +1851,12 @@ function ReviewPage(props) {
         lspClearDocument()
         return
       }
-      // Historical content is a past version of the file: its line numbers do
-      // not match the worktree, so never hand it to the language server.
-      if (historical) {
-        lspClearDocument()
-        return
-      }
       // Derive the LSP language from the file extension (Monaco's model
       // language depends on which tokenizers are registered and can be
       // plaintext); the bridge needs the language server's language id.
+      // Historical content is handed over too: the bridge overlays this text,
+      // so go-to-definition/references/hover/symbols work on the old snapshot
+      // (diagnostics stay suppressed for it, see lspSetDocument).
       lspSetDocument({
         path: info.path,
         text: info.text,
@@ -1719,6 +1865,7 @@ function ReviewPage(props) {
         model: info.model,
         sessionId,
         cwd: cwdFromStore,
+        historical,
       })
       void lspCheckAvailability()
     },
@@ -1923,6 +2070,8 @@ function ReviewPage(props) {
 
 /**
  * The tab-kind body: reads the tab record via `useTabInfo()` and renders the page.
+ * Keyed by session: a different conversation gets a fresh page instance, whose
+ * mount restores that session's remembered tabs/baseline from `pageSessionStore`.
  * @param {object} props slot props
  * @returns {any} React element
  */
@@ -1936,6 +2085,7 @@ function ReviewTabBody(props) {
   }
   const address = tab && tab.contentId ? tab.contentId : null
   return h(ReviewPage, {
+    key: sessionId,
     sessionId,
     t,
     useSessions,
@@ -1954,6 +2104,6 @@ function ReviewViewBody(props) {
   const { sessionId, t, useSessions, services } = props
   return h('div', { className: 'drp-view-wrap' },
     h('div', { className: 'drp-view-hint' }, t('error.sidebarUnavailable')),
-    h(ReviewPage, { sessionId, t, useSessions, services, address: null }),
+    h(ReviewPage, { key: sessionId, sessionId, t, useSessions, services, address: null }),
   )
 }

@@ -269,7 +269,7 @@ function diagnosticHarness(responder, hidden = false) {
     (fn, delay) => { const id = ++nextTimer; timers.set(id, {fn,at:now+delay}); return id },
     (id) => timers.delete(id), {now:()=>now}, document)
   const flush = async () => { for(let n=0;n<20;n++) await Promise.resolve() }
-  const open = (path = 'a.ts') => harnessClient.lspSetDocument({sessionId:'s',cwd:'E:/workspace',path,text:'current',languageId:'typescript',model:{},monaco})
+  const open = (path = 'a.ts', extra = {}) => harnessClient.lspSetDocument({sessionId:'s',cwd:'E:/workspace',path,text:'current',languageId:'typescript',model:{},monaco,...extra})
   return {
     client:harnessClient, polls, writes, timers, listeners, open, flush,
     hide(value) { document.hidden = value; for (const listener of listeners) listener() },
@@ -321,6 +321,25 @@ for (const reason of ['missing-server','unsupported-language']) {
   h.client.lspDispose()
 }
 ok('virtual clock: missing/unsupported servers stop polling and explicit recheck restarts it')
+
+{
+  // Historical (git revision) documents are first-class LSP documents for
+  // navigation, but their diagnostics would mix the old snapshot with the
+  // current worktree project, so the bridge must never poll or paint them.
+  const h = diagnosticHarness(() => ({ available: true, pending: false, diagnostics: [diagnostic('historical snapshot error')] }))
+  h.open('a.ts', { historical: true })
+  assert.equal(h.client.lspRuntime.historical, true)
+  assert.equal(h.timers.size, 0, 'historical content must not schedule diagnostics polling')
+  await h.advance(60000)
+  assert.equal(h.polls.length, 0, 'historical content must not request diagnostics')
+  assert(!h.writes.some((entry) => entry.markers.length > 0), 'historical content must not paint markers')
+  h.open('b.ts', { historical: false })
+  await h.advance(65000)
+  assert.equal(h.client.lspRuntime.historical, false)
+  assert(h.polls.some((entry) => entry.body.action === 'diagnostics'), 'leaving historical content re-arms diagnostics')
+  h.client.lspDispose()
+}
+ok('virtual clock: historical snapshot documents suppress diagnostics and worktree documents resume them')
 
 {
   const pending = []
@@ -437,6 +456,32 @@ if (process.argv.includes('--real')) {
       await new Promise(resolve=>setTimeout(resolve,250))
     }
     assert.equal(watched.locations?.[0]?.line,21,JSON.stringify(watched))
+    // Historical (git revision) text overlay: the bridge opens exactly the text
+    // the review page shows, so same-file navigation works on that snapshot.
+    // This is what F12 on a historical version relies on (the worktree file on
+    // disk is a different, presumably newer version of the same path).
+    const oldText = [
+      'export const CURRENT = 1',
+      'export function legacyHelper(label: string) {',
+      '  return label.toUpperCase()',
+      '}',
+      'const legacyGreeting = legacyHelper("old")',
+      '',
+    ].join('\n')
+    await writeFile(join(temp,'old.ts'),'export const CURRENT = 2\nexport function currentHelper() { return CURRENT }\n')
+    const historicalAsk = (action,line,column)=>real.operate({sessionId:'real-hist',cwd:temp,languageId:'typescript',path:'old.ts',text:oldText,action,line,column})
+    const usageLine = 5
+    const usageColumn = oldText.split('\n')[usageLine-1].indexOf('legacyHelper')+1
+    const historicalDefinition = await historicalAsk('definition',usageLine,usageColumn)
+    assert.equal(historicalDefinition.available,true,JSON.stringify(historicalDefinition))
+    assert.equal(historicalDefinition.locations?.[0]?.path,'old.ts',JSON.stringify(historicalDefinition))
+    assert.equal(historicalDefinition.locations?.[0]?.line,2,JSON.stringify(historicalDefinition))
+    assert.equal(historicalDefinition.locations?.[0]?.column,oldText.split('\n')[1].indexOf('legacyHelper')+1,JSON.stringify(historicalDefinition))
+    const historicalHover = await historicalAsk('hover',usageLine,usageColumn)
+    assert(String(historicalHover.contents||'').includes('legacyHelper'),JSON.stringify(historicalHover))
+    const historicalSymbols = await historicalAsk('symbols')
+    assert(historicalSymbols.symbols?.some(x=>x.name==='legacyHelper' && x.line===2),JSON.stringify(historicalSymbols))
+    assert(!historicalSymbols.symbols?.some(x=>x.name==='currentHelper'),'the overlaid snapshot must win over the worktree file')
     const badText = 'const count: number = "wrong"\n'
     let diagnostics
     for (let n=0;n<24;n++) {
@@ -445,7 +490,7 @@ if (process.argv.includes('--real')) {
       await new Promise(resolve=>setTimeout(resolve,250))
     }
     assert(diagnostics.diagnostics?.some(x=>x.message.includes('number')),JSON.stringify(diagnostics))
-    ok('REAL TypeScript: DEFAULT_RETRY navigation, references/hover/outline, library target, unicode/#/% paths, closed-overlay/external-file edits and diagnostics')
+    ok('REAL TypeScript: DEFAULT_RETRY navigation, references/hover/outline, library target, unicode/#/% paths, closed-overlay/external-file edits, historical-snapshot overlay and diagnostics')
   } finally {
     real.dispose()
     for (const cleanup of cleanups) cleanup()

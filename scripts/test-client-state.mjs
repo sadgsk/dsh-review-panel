@@ -25,7 +25,7 @@ function harness(read) {
     Fragment: Symbol('Fragment'),
     createElement(type, props, ...children) {
       const element = { type, props: props || {}, children }
-      active.created.push(element)
+      if (active) active.created.push(element)
       return element
     },
     useState(initial) {
@@ -110,7 +110,7 @@ function harness(read) {
   const suffix = `
     loadMonaco = () => Promise.resolve({});
     apiGet = (name, params, signal) => fixtures.read(name, params, signal);
-    return {ReviewPage, FileTree, MonacoHost, runtimeState};
+    return {ReviewPage, ReviewTabBody, FileTree, MonacoHost, runtimeState, pageSessionStore};
   `
   const api = new Function('React', 'fixtures', 'window', 'document', 'setTimeout', 'clearTimeout',
     prefix + sources.join('\n') + suffix)(React, fixtures, window, document,
@@ -118,7 +118,10 @@ function harness(read) {
   return {
     fixtures, api,
     editor(props) { return new Runner(api.MonacoHost, props) },
-    page(sessionId = 's1') {
+    page(sessionId = 's1', options = {}) {
+      // The page now remembers its per-session workspace across unmounts; clear
+      // that store between (independent) tests unless the test is about it.
+      if (!options.keepState) api.pageSessionStore.clear()
       const store = { byId: { [sessionId]: { cwd: 'C:/workspace', running: true } } }
       const page = new Runner(api.ReviewPage, { sessionId, t: (key) => key, useSessions: (selector) => selector(store), services: {} })
       page.store = store
@@ -142,6 +145,18 @@ async function chooseMode(page, id) {
   item.props.onClick()
   await page.settle()
 }
+
+test('the sidebar tab body is keyed by session so a switch remounts the page', () => {
+  const h = harness(async () => { throw new Error('no reads during a key check') })
+  const element = h.api.ReviewTabBody({
+    sessionId: 'sess-x',
+    t: (key) => key,
+    useTabInfo: () => ({ tab: null }),
+    services: {},
+  })
+  assert.equal(element.props.key, 'sess-x', 'the page instance is keyed by session id')
+  assert.equal(element.props.sessionId, 'sess-x')
+})
 
 test('a new turn reloads the active text and never paints new hunks over old text', async () => {
   let seq = 1
@@ -465,7 +480,7 @@ const comparePayload = (scope, rev) => ({
 })
 const commitRecord = (short, subject) => ({ sha: short.repeat(8), short, subject, date: '2026-01-02T03:04:05Z' })
 
-test('最新提交 loads the HEAD comparison, historical content and diff and disables LSP for historical content', async () => {
+test('最新提交 loads the HEAD comparison, historical content and diff and keeps LSP navigation on the snapshot', async () => {
   const reads = []
   const h = harness(async (name, params) => {
     reads.push({ name, ...params })
@@ -495,6 +510,8 @@ test('最新提交 loads the HEAD comparison, historical content and diff and di
   // TURN content feeds the language server.
   editor().onModelReady({ path: 'a.ts', text: 'worktree text', language: 'typescript', monaco: {}, model: {} })
   assert.equal(h.fixtures.lspDocuments.length, 1)
+  assert.equal(h.fixtures.lspDocuments[0].historical, false, 'worktree documents are not historical')
+  const worktreeEpoch = editor().documentEpoch
 
   await chooseMode(page, 'revision-head')
   assert.equal(modeLabel().children.join(''), 'mode.commit')
@@ -518,10 +535,134 @@ test('最新提交 loads the HEAD comparison, historical content and diff and di
   assert.equal(page.node('FileTree').props.gitStatus.files.length, 1)
 
   const clears = h.fixtures.lspClears
+  const docsBefore = h.fixtures.lspDocuments.length
+  assert.ok(editor().documentEpoch > worktreeEpoch, 'entering historical content re-announces the document')
   editor().onModelReady({ path: 'a.ts', text: 'historical text', language: 'typescript', monaco: {}, model: {} })
-  assert.ok(h.fixtures.lspClears > clears, 'historical content clears the LSP document')
-  assert.equal(h.fixtures.lspDocuments.length, 1, 'historical content is never opened as an LSP document')
+  assert.equal(h.fixtures.lspClears, clears, 'historical content is not detached from the language server')
+  assert.equal(h.fixtures.lspDocuments.length, docsBefore + 1, 'historical content feeds the language server')
+  assert.equal(h.fixtures.lspDocuments.at(-1).text, 'historical text')
+  assert.equal(h.fixtures.lspDocuments.at(-1).historical, true, 'historical documents are flagged so diagnostics stay off')
   page.dispose()
+})
+
+test('switching sessions and back restores the open files, active tab and git version baseline', async () => {
+  const commit = commitRecord('a1a1a1a', 'session state')
+  const reads = []
+  const h = harness(async (name, params) => {
+    reads.push({ name, ...params })
+    if (name === 'latest') return { available: true, seq: 1, turn: 1, summary: { files: [{ path: 'a.ts' }] } }
+    if (name === 'gitStatus') return { available: true, files: [{ path: 'a.ts', code: 'M' }, { path: 'b.ts', code: 'M' }] }
+    if (name === 'config') return { phase: 3, features: { lsp: true, gitRevisions: true } }
+    if (name === 'file') return { kind: 'text', text: (params.rev ? 'content of ' : 'worktree ') + params.path }
+    if (name === 'diff') return textDiff('turn base', 'worktree ' + params.path)
+    if (name === 'gitCompare') return {
+      ...comparePayload(params.scope, params.rev),
+      files: [{ path: 'a.ts', code: 'M' }, { path: 'b.ts', code: 'M' }],
+    }
+    if (name === 'gitFile') return textDiff('base ' + params.path, 'content ' + params.path)
+    if (name === 'tree') return { entries: [{ name: 'a.ts', type: 'file' }, { name: 'b.ts', type: 'file' }] }
+    throw new Error(name)
+  })
+  /** Open tab titles, in strip order. */
+  const tabsOf = (runner) => runner.created
+    .filter((node) => String(node.props.className || '').split(' ').includes('drp-tab'))
+    .map((node) => node.props.title)
+  const modeLabelOf = (runner) => runner.created
+    .find((node) => String(node.props.className || '').split(' ').includes('drp-mode-label'))
+    .children.join('')
+
+  // Session A: two files opened and a specific git version selected.
+  const page = h.page('session-a')
+  await page.settle()
+  page.node('FileTree').props.onOpen('a.ts')
+  await page.settle()
+  page.node('FileTree').props.onOpen('b.ts')
+  await page.settle()
+  await chooseMode(page, 'revision')
+  page.node('PickerOverlay').props.onPickRevision(commit)
+  await page.settle()
+  assert.deepEqual(tabsOf(page), ['a.ts', 'b.ts'])
+  assert.equal(page.node('MonacoHost').props.file.text, 'content of b.ts')
+  assert.equal(modeLabelOf(page), 'mode.revision.with')
+  // DSH unmounts the tab body when the conversation switches: simulate the
+  // unmount (persisting) and the later remount for the same session.
+  page.dispose()
+  const readCount = reads.length
+  const restored = h.page('session-a', { keepState: true })
+  await restored.settle()
+  assert.deepEqual(tabsOf(restored), ['a.ts', 'b.ts'], 'the previously opened files come back')
+  assert.equal(modeLabelOf(restored), 'mode.revision.with', 'the git version baseline is restored')
+  assert.equal(restored.node('MonacoHost').props.file.text, 'content of b.ts', 'the active file is restored at the selected git version')
+  assert.equal(restored.node('ReviewStatusBar').props.gitText, 'status.revision.historical')
+  assert.equal(restored.node('FileTree').props.treeMode, 'revision')
+  const restoredFileReads = reads.slice(readCount).filter((entry) => entry.name === 'file' && entry.path === 'b.ts')
+  assert.equal(restoredFileReads.length, 1, 'restoring the active file reads it exactly once')
+
+  // A different session still starts clean (auto-opens the turn's first file in
+  // the default baseline) instead of inheriting session A's workspace.
+  const other = h.page('session-b')
+  await other.settle()
+  assert.deepEqual(tabsOf(other), ['a.ts'], 'another session starts from its own default')
+  assert.equal(modeLabelOf(other), 'mode.turn.withTurn')
+  assert.equal(other.node('ReviewStatusBar').props.gitText, null)
+  other.dispose()
+  restored.dispose()
+})
+
+test('a user action during a slow remount is not overwritten by the restored workspace', async () => {
+  const commit = commitRecord('b2b2b2b', 'slow mount')
+  const pendingLatest = deferred()
+  let delayLatest = false
+  const h = harness(async (name, params) => {
+    if (name === 'latest') {
+      if (delayLatest) return pendingLatest.promise
+      return { available: true, seq: 1, turn: 1, summary: { files: [{ path: 'a.ts' }] } }
+    }
+    if (name === 'gitStatus') return { available: true, files: [{ path: 'a.ts', code: 'M' }, { path: 'b.ts', code: 'M' }] }
+    if (name === 'config') return { phase: 3, features: { lsp: true, gitRevisions: true } }
+    if (name === 'file') return { kind: 'text', text: (params.rev ? 'content of ' : 'worktree ') + params.path }
+    if (name === 'diff') return textDiff('turn base', 'worktree ' + params.path)
+    if (name === 'gitCompare') return {
+      ...comparePayload(params.scope, params.rev),
+      files: [{ path: 'a.ts', code: 'M' }, { path: 'b.ts', code: 'M' }],
+    }
+    if (name === 'gitFile') return textDiff('base ' + params.path, 'content ' + params.path)
+    if (name === 'tree') return { entries: [{ name: 'a.ts', type: 'file' }, { name: 'b.ts', type: 'file' }, { name: 'c.ts', type: 'file' }] }
+    throw new Error(name)
+  })
+  const tabsOf = (runner) => runner.created
+    .filter((node) => String(node.props.className || '').split(' ').includes('drp-tab'))
+    .map((node) => node.props.title)
+  const modeLabelOf = (runner) => runner.created
+    .find((node) => String(node.props.className || '').split(' ').includes('drp-mode-label'))
+    .children.join('')
+
+  // Session A remembers a git-version baseline with two open files.
+  const page = h.page('session-a')
+  await page.settle()
+  page.node('FileTree').props.onOpen('a.ts')
+  await page.settle()
+  page.node('FileTree').props.onOpen('b.ts')
+  await page.settle()
+  await chooseMode(page, 'revision')
+  page.node('PickerOverlay').props.onPickRevision(commit)
+  await page.settle()
+  page.dispose()
+
+  // The remount hangs on /latest; the user already opens another file.
+  delayLatest = true
+  const restored = h.page('session-a', { keepState: true })
+  await restored.settle()
+  restored.node('FileTree').props.onOpen('c.ts')
+  await restored.settle()
+  assert.equal(restored.node('MonacoHost').props.file.path, 'c.ts')
+  pendingLatest.resolve({ available: true, seq: 1, turn: 1, summary: { files: [{ path: 'a.ts' }] } })
+  await restored.settle()
+  assert.deepEqual(tabsOf(restored), ['c.ts'], 'the file opened during the remount wins')
+  assert.equal(restored.node('MonacoHost').props.file.path, 'c.ts', 'the active file is not replaced by the remembered one')
+  assert.equal(modeLabelOf(restored), 'mode.turn.withTurn', 'the default baseline still initialises')
+  assert.equal(restored.node('ReviewStatusBar').props.gitText, null, 'the remembered git version is not forced back')
+  restored.dispose()
 })
 
 test('the revisions picker applies scope, resolves raw revisions and refetches when the scope changes', async () => {
@@ -659,6 +800,7 @@ test('switching back to turn restores the turn baseline and its language-server 
   const docs = h.fixtures.lspDocuments.length
   page.node('MonacoHost').props.onModelReady({ path: 'a.ts', text: 'worktree text', language: 'typescript', monaco: {}, model: {} })
   assert.equal(h.fixtures.lspDocuments.length, docs + 1)
+  assert.equal(h.fixtures.lspDocuments.at(-1).historical, false, 'worktree content re-enables diagnostics')
   page.dispose()
 })
 
