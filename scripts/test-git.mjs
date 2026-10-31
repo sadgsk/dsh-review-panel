@@ -89,6 +89,12 @@ const compare = (cwd, rev, scope = 'commit') => readGitCompare(ctx, provider, { 
 const against = (cwd, path, rev, scope = 'commit') => readGitFileAgainst(ctx, provider, { sessionId: 'git-regression', cwd, path, rev, scope, signal })
 const contentAt = (cwd, path, rev) => readGitContentAt(ctx, provider, { cwd, path, rev, signal })
 const revisions = (cwd, query) => listGitRevisions(runner, cwd, { query, signal })
+// Git prints its work-tree root with forward slashes even on Windows, while
+// fs.realpath uses native separators there; compare one canonical spelling.
+const rootKey = (value) => {
+  const normalized = String(value).replace(/\\/g, '/').replace(/\/+$/, '')
+  return process.platform === 'win32' ? normalized.toLowerCase() : normalized
+}
 const SHA1_EMPTY_TREE = '4b825dc642cb6eb9a060e54bf8d69288fbee4904'
 const SHA256_EMPTY_TREE = '6ef19b41225c5369f1c104d45d8d85efa9b057b53b14b4b9b939dd74decc5321'
 
@@ -360,7 +366,7 @@ try {
   const cloneRevisions = await revisions(cloned)
   assert.equal(cloneRevisions.available, true, JSON.stringify(cloneRevisions))
   assert.equal(cloneRevisions.unborn, false)
-  assert.equal(cloneRevisions.root, await realpath(cloned))
+  assert.equal(rootKey(cloneRevisions.root), rootKey(await realpath(cloned)))
   assert.equal(cloneRevisions.head.sha, cloneSecond)
   assert.ok(cloneSecond.startsWith(cloneRevisions.head.short))
   assert.equal(cloneRevisions.head.subject, 'second commit')
