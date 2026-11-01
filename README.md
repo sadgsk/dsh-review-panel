@@ -3,7 +3,7 @@
 [![License](https://img.shields.io/badge/license-MIT-blue)](LICENSE) [![DeepSeek Harness](https://img.shields.io/badge/DeepSeek%20Harness-0.2.1%2B-4B6BFB)](https://www.deepseek.com/download/) [![CI](https://img.shields.io/github/actions/workflow/status/sadgsk/dsh-review-panel/ci.yml?branch=main&label=CI)](https://github.com/sadgsk/dsh-review-panel/actions/workflows/ci.yml) <br>
 [English](README.en.md) · [Issues](https://github.com/sadgsk/dsh-review-panel/issues)
 
-![代码审查：左侧对话 + 右侧完整源码与行级内联 diff（Git 历史版本对比）](docs/images/review-panel.png)
+![代码审查：左侧对话 + 右侧完整源码与行级内联 diff（Git 历史版本对比）](docs/images/review-panel-0.3.1.png)
 
 ## 这是什么
 
