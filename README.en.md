@@ -19,6 +19,18 @@ DSH's builtin review shows one hunk at a time; this panel gives you the **whole 
 - **Read-only by design** — never writes files, never runs git mutations, never installs anything silently
 - **Follows the DSH light/dark theme automatically**
 
+## 🆕 What's New
+
+### v0.3.1 · Historical git diffs
+
+You can now review changes against **any historical git version** right inside the Code Review page:
+
+- **Diff against any git version** — the baseline dropdown now offers **Latest commit** and **Git version…**. Pick any commit, branch, tag or revision expression such as `HEAD~2` and review exactly what it changed with full source and line-level inline diffs; switch to **Changes since this version** to see the cumulative diff from that version up to the current worktree. Especially handy for reviewing the last round right after pushing.
+- **Language-server navigation works on historical versions** — `F12` go-to-definition, `Shift+F12` references, hover and the document outline all work on the snapshot; a cross-file jump opens the target file at that version. (Diagnostics stay hidden there so an old snapshot is never mixed with the current worktree; they come back on the worktree baselines.)
+- **Your review workspace survives session switches** — switch to another conversation or sidebar tab and come back: the open files, active tab and selected diff baseline (including the picked git version) are still there.
+
+> Full history: [commits/main](https://github.com/sadgsk/dsh-review-panel/commits/main).
+
 ## Install
 
 Requires **DSH 0.2.1-rc.2** or newer (Desktop and Web both work). Git and language servers are optional; the panel degrades gracefully without them.
